@@ -86,12 +86,14 @@ def _default_ollama_llm(*, system: str, user: str, model: str = "gemma4:e4b") ->
     # different tag of the family (gemma4:e2b on most machines), so resolve
     # against what is actually installed rather than 404 on a clean box.
     model = resolve_chat_model(model)
+    from backend.utils.ollama_resource_manager import think_payload
     response = ollama.chat(
         model=model,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
+        **think_payload(model),
     )
     return response["message"]["content"]
 

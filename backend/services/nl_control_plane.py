@@ -42,6 +42,7 @@ def json_chat(
     brace-balanced span. Returns `on_error` (default {}) on any failure.
     """
     import ollama
+    from backend.utils.ollama_resource_manager import think_payload
 
     if model is None:
         from backend.config import get_default_llm
@@ -57,6 +58,7 @@ def json_chat(
             ],
             format="json",
             options={"temperature": temperature},
+            **think_payload(model),
         )
     except Exception as e:  # noqa: BLE001 — degrade, don't crash the caller
         logger.error("nl_control_plane.json_chat: ollama.chat failed: %s", e)

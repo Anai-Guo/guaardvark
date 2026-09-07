@@ -212,6 +212,7 @@ def enhance_prompts(
         # silently returned [] → originals (the batch-director no-op bug, fixed 2026-06-23).
         # Mirror storyboard_from_concept: own chat call + _parse_image_prompts (list-aware).
         import ollama
+        from backend.utils.ollama_resource_manager import think_payload
         opts = _options(n, sampling)
         resp = ollama.chat(
             model=resolved,
@@ -221,6 +222,7 @@ def enhance_prompts(
                 {"role": "user", "content": user},
             ],
             options=opts,
+            **think_payload(resolved),
         )
         out = _parse_image_prompts(resp["message"]["content"], n)
         if len(out) == n:
@@ -257,6 +259,7 @@ def refine_edit_instruction(instruction: str, *, model: Optional[str] = None,
     resolved = _resolve_model(model or DEFAULT_DIRECTOR_MODEL)
     try:
         import ollama
+        from backend.utils.ollama_resource_manager import think_payload
         import json as _json
         resp = ollama.chat(
             model=resolved,
@@ -266,6 +269,7 @@ def refine_edit_instruction(instruction: str, *, model: Optional[str] = None,
                 {"role": "user", "content": f"User edit request: {instr}"},
             ],
             options=_options(1, sampling),
+            **think_payload(resolved),
         )
         data = _json.loads(resp["message"]["content"])
         refined = (data.get("instruction") or "").strip()
@@ -303,6 +307,7 @@ def storyboard_from_concept(
     try:
         # Use a direct chat wrapper for storyboard (rich)
         import ollama
+        from backend.utils.ollama_resource_manager import think_payload
         opts = _options(n, sampling)
         resp = ollama.chat(
             model=resolved,
@@ -312,6 +317,7 @@ def storyboard_from_concept(
                 {"role": "user", "content": user},
             ],
             options=opts,
+            **think_payload(resolved),
         )
         content = resp["message"]["content"]
         data = _parse_storyboard_output(content, n)

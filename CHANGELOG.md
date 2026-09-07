@@ -23,6 +23,14 @@ Everything the H3 release can do, wired through the product, on a branch until i
   that choice instead of silently reasoning again. Retrieved context handed to the chat model
   is cut on whitespace (`backend/utils/text_cut.py`): a 500-character slice through "4:12"
   left "4:1" in a prompt and the model repeated it as fact.
+- **The same answer-only default for every direct Ollama call.** The film crew's
+  screenwriting and consensus calls, the character generator, the video, media and music video
+  directors, the animation steering prompt, the video quality review, the H3 prompt polish, the
+  outreach persona and grader, the natural-language control plane, the lesson distiller, image
+  OCR and the music prompt rewriter each built their own request without a `think` field, so a
+  thinking model could spend a 150- or 400-token cap on reasoning and return nothing to parse.
+  Every one of them now spreads `think_payload(model)`, which is `{"think": false}` for a model
+  that reasons and nothing for any other.
 - **One active video model for every pipeline.** Chat `/video`, `videos generate` in the CLI,
   batch requests that omit a model, the music video and Film Crew all pick their model through
   one resolver: an explicit id, else a per-pipeline override, else the global setting at

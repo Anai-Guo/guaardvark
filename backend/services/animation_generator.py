@@ -310,6 +310,7 @@ class AnimationGenerator:
                             "images": [img_b64],
                         }],
                         options={"num_predict": 150, "temperature": 0.3},
+                        **think_payload(model),
                     )
                     text = response.get("message", {}).get("content", "").strip()
                     if text and len(text) > 20:

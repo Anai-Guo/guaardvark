@@ -250,11 +250,13 @@ def review_video_quality(
 
     try:
         import ollama
+        from backend.utils.ollama_resource_manager import think_payload
         resp = ollama.chat(
             model=model,
             messages=[{"role": "user", "content": prompt, "images": frames}],
             format="json",
             options={"temperature": 0.2, "num_predict": 500},
+            **think_payload(model),
         )
         raw = (resp["message"]["content"] or "").strip()
     except Exception as e:  # noqa: BLE001 — optional signal, never crash the caller
