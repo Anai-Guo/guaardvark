@@ -300,6 +300,8 @@ class AnimationGenerator:
 
             # Use a vision model — try gemma4 first
             vision_models = ["gemma4:e4b", "llava:7b", "moondream:latest"]
+            from backend.utils.ollama_resource_manager import think_payload
+
             for model in vision_models:
                 try:
                     response = ollama.chat(

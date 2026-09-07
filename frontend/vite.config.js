@@ -4,8 +4,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createLogger, defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
-import { NodeGlobalsPolyfillPlugin } from "@esbuild-plugins/node-globals-polyfill";
-import { NodeModulesPolyfillPlugin } from "@esbuild-plugins/node-modules-polyfill";
 import rollupNodePolyFill from "rollup-plugin-polyfill-node";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -159,7 +157,14 @@ export default defineConfig(({ mode }) => {
   resolve: {
     // `@` is core: extensions import it as `@/api/apiClient` instead of
     // counting `../` up to wherever core sits.
-    alias: { "@": path.resolve(__dirname, "src") },
+    alias: [
+      { find: /^@\//, replacement: `${path.resolve(__dirname, "src")}/` },
+      // @mui/icons-material 5.x has no exports map, so `@mui/icons-material/Add`
+      // resolves to its CommonJS file. Vite 8's pre-bundler hands a default
+      // import of that file the module object, not the component ("Element type
+      // is invalid ... got: object"). Point every icon import at the ESM build.
+      { find: /^@mui\/icons-material(?!\/esm)(\/.*)?$/, replacement: "@mui/icons-material/esm$1" },
+    ],
   },
   test: {
     globals: true,
@@ -187,19 +192,13 @@ export default defineConfig(({ mode }) => {
       'react-dom',
       'react/jsx-runtime'
     ],
-    esbuildOptions: {
-      define: {
-        global: "globalThis",
-      },
-      plugins: [
-        NodeGlobalsPolyfillPlugin({
-          buffer: true,
-          process: true,
-          global: true,
-        }),
-        NodeModulesPolyfillPlugin(),
-      ],
-    },
+    // Vite 8 pre-bundles with Rolldown, which takes no esbuild plugins: the
+    // esbuild-only Node polyfill plugins made every dependency scan fail and
+    // left the dev server with no pre-bundled deps at all. The build keeps its
+    // rollup polyfill below; `global` is defined once at the top level.
+  },
+  define: {
+    global: "globalThis",
   },
   build: {
     chunkSizeWarningLimit: 1000,
