@@ -325,6 +325,9 @@ const SettingsPage = () => {
   const [clearMemoriesBusy, setClearMemoriesBusy] = useState(false);
   const [memoryCount, setMemoryCount] = useState(null);
   const [musicDirectorySaved, setMusicDirectorySaved] = useState("");
+  // "rules" clears rules the chat learned; "log" empties the behaviour log file.
+  const [learningClear, setLearningClear] = useState(null);
+  const [learningBusy, setLearningBusy] = useState(false);
 
   // RAG Autoresearch settings state
   const [autoresearchSettings, setAutoresearchSettings] = useState({});
@@ -1352,17 +1355,6 @@ const SettingsPage = () => {
     setRebootProgressModalOpen(false);
     setRebootInProgress(false);
   };
-  const _handleResetIndexClick = () => {
-    /* ... (unchanged from v3.4) ... */
-    handleActionClick(
-      apiService.resetIndexStorage,
-      [],
-      "Reset the LlamaIndex vector store? ALL indexed document knowledge will be lost and require re-indexing.",
-      "Resetting index storage...",
-      "Index storage cleared. Please re-index documents.",
-      "Failed to reset index storage",
-    );
-  };
 
   const handleOpenPurgeModal = () => {
     setPurgeModalOpen(true);
@@ -1384,27 +1376,6 @@ const SettingsPage = () => {
     );
     setIsPurging(false);
     setPurgeModalOpen(false);
-  };
-  const _handlePurgeBehaviorLearningClick = () => {
-    handleActionClick(
-      apiService.purgeBehaviorLearning,
-      [],
-      "Purge all learned behaviors? This cannot be undone.",
-      "Purging learned behaviors...",
-      "Learned behaviors purged.",
-      "Failed to purge learned behaviors",
-    );
-  };
-
-  const _handleClearBehaviorLogClick = () => {
-    handleActionClick(
-      clearBehaviorLog,
-      [],
-      "Clear the user behavior log file? This cannot be undone.",
-      "Clearing behavior log...",
-      "Behavior log cleared successfully",
-      "Failed to clear behavior log",
-    );
   };
 
   // Support both Chip clicks (no checked field) and Switch/Checkbox events
@@ -1784,10 +1755,6 @@ const SettingsPage = () => {
     }
   };
 
-  const _triggerFileImportInput = () => {
-    fileImportInputRef.current?.click();
-  };
-
   const handleImportRulesClick = async () => {
     if (!selectedFileForImport) {
       showMessage("Please select a JSON file to import.", "warning");
@@ -2138,6 +2105,29 @@ const SettingsPage = () => {
   useEffect(() => {
     fetchMemoryCount();
   }, [fetchMemoryCount]);
+
+  const confirmClearLearning = async () => {
+    setLearningBusy(true);
+    try {
+      const result =
+        learningClear === "rules"
+          ? await apiService.purgeBehaviorLearning()
+          : await clearBehaviorLog();
+      if (result?.error) throw new Error(result.error.message || result.error);
+      showMessage(
+        result?.message ||
+          (learningClear === "rules"
+            ? "Learned rules cleared."
+            : "Behaviour log cleared."),
+        "success",
+      );
+      setLearningClear(null);
+    } catch (err) {
+      showMessage(`Failed to clear: ${err.message}`, "error");
+    } finally {
+      setLearningBusy(false);
+    }
+  };
 
   const confirmClearMemories = async () => {
     setClearMemoriesBusy(true);
@@ -3189,6 +3179,22 @@ const SettingsPage = () => {
         >
           Rebuild index
         </ActionButton>
+        <ActionButton
+          kind="destructive"
+          onClick={() => setLearningClear("rules")}
+          disabled={isLoading}
+          tooltip="Deletes every rule the chat learned on its own; rules you wrote stay"
+        >
+          Clear learned rules
+        </ActionButton>
+        <ActionButton
+          kind="destructive"
+          onClick={() => setLearningClear("log")}
+          disabled={isLoading}
+          tooltip="Empties the behaviour log that Behaviour learning reads from"
+        >
+          Clear behaviour log
+        </ActionButton>
         <Sep />
         <ActionButton
           kind="destructive"
@@ -3577,6 +3583,30 @@ const SettingsPage = () => {
         keeps="rules, chats and documents."
         confirmLabel="Clear memory"
         busy={clearMemoriesBusy}
+      />
+      <ConfirmActionDialog
+        open={learningClear !== null}
+        onClose={() => !learningBusy && setLearningClear(null)}
+        onConfirm={confirmClearLearning}
+        title={
+          learningClear === "rules"
+            ? "Clear learned rules"
+            : "Clear behaviour log"
+        }
+        description={
+          learningClear === "rules"
+            ? "Deletes every rule marked as learned, the ones the chat added on its own from corrections and preferences."
+            : "Empties the behaviour log file that Behaviour learning reads to adapt replies. Learning starts again from nothing."
+        }
+        keeps={
+          learningClear === "rules"
+            ? "rules you wrote or imported, chats, memories."
+            : "learned rules, chats, memories."
+        }
+        confirmLabel={
+          learningClear === "rules" ? "Clear learned rules" : "Clear log"
+        }
+        busy={learningBusy}
       />
       <RebuildIndexDialog
         open={rebuildDialogOpen}
