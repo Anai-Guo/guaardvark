@@ -86,6 +86,16 @@ const debugLog = (...args) => {
 
 // localStorage keys for persisting settings
 const WEB_SEARCH_ENABLED_KEY = "guaardvark_webSearchEnabled";
+
+// model_api and system_api call success_response(message, data) with the
+// arguments reversed, so their payload arrives under "message". The service
+// layer compensates route by route; the raw fetches on this page do it here.
+const payloadOf = (d) => {
+  if (d && typeof d.data === "object" && d.data !== null) return d.data;
+  if (d && typeof d.message === "object" && d.message !== null)
+    return d.message;
+  return d?.data ?? d;
+};
 const ADV_DEBUG_ENABLED_KEY = "guaardvark_advDebugEnabled";
 const BEHAVIOR_LEARNING_ENABLED_KEY = "guaardvark_behaviorLearningEnabled";
 const LLM_DEBUG_ENABLED_KEY = "guaardvark_llmDebugEnabled";
@@ -899,7 +909,7 @@ const SettingsPage = () => {
       clearTimeout(timeoutId);
       if (r.ok) {
         const d = await r.json();
-        if (d.success) setGpuResources(d.data);
+        if (d.success) setGpuResources(payloadOf(d));
       }
     } catch (e) {
       if (e.name === "AbortError") return; // Timeout or navigation — not an error
@@ -967,7 +977,8 @@ const SettingsPage = () => {
     const fetchVersion = async () => {
       try {
         const result = await apiService.getVersion();
-        if (result?.version) setAppVersion(result.version);
+        const version = payloadOf(result)?.version ?? result?.version;
+        if (version) setAppVersion(version);
       } catch (err) {
         console.warn("Failed to fetch app version:", err);
       }
@@ -1960,12 +1971,13 @@ const SettingsPage = () => {
       const d = await r.json();
       if (d.success) {
         setEmbeddingModel(selectedEmbeddingModel);
-        const dims = d.data?.dimensions;
+        const payload = payloadOf(d);
+        const dims = payload?.dimensions;
         showMessage(
-          d.data?.index_cleared
+          payload?.index_cleared
             ? `Embedding switched to ${selectedEmbeddingModel} (${dims}d). The index was emptied; re-index your documents.`
             : `Embedding switched to ${selectedEmbeddingModel} (${dims}d). Same width, index kept.`,
-          d.data?.index_cleared ? "warning" : "success",
+          payload?.index_cleared ? "warning" : "success",
         );
         fetchResources();
         setProfilesReloadKey((k) => k + 1);
