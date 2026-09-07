@@ -78,6 +78,7 @@ import { useVoice } from "../contexts/VoiceContext";
 import * as apiService from "../api";
 import voiceService from "../api/voiceService";
 import { ragAutoresearchService } from "../api/ragAutoresearchService";
+import { NAV_CHROME } from "../config/navCatalog";
 
 const debugLog = (...args) => {
   if (import.meta.env.DEV) {
@@ -2430,12 +2431,12 @@ const SettingsPage = () => {
             onChange={setNavChrome}
             options={[
               {
-                value: "sidebar",
+                value: NAV_CHROME.SIDEBAR,
                 label: "Sidebar",
                 tooltip: "Every page in one list",
               },
               {
-                value: "workspaces",
+                value: NAV_CHROME.SOFTWARE,
                 label: "Workspaces",
                 tooltip: "Pages grouped by workspace in the top bar",
               },
