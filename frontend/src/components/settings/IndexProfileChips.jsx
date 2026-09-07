@@ -30,8 +30,9 @@ export const describeProjection = (p) => {
  * @param {function} [onLoaded]   receives the profile list on every load
  * @param {any}      [reloadKey]  change it to force a reload (after a rebuild)
  * @param {function} [showMessage]
+ * @param {function} [onEdit]      receives the profile; the chip shows a gear
  */
-const IndexProfileChips = ({ onLoaded, reloadKey, showMessage }) => {
+const IndexProfileChips = ({ onLoaded, reloadKey, showMessage, onEdit }) => {
   const [profiles, setProfiles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
@@ -98,6 +99,7 @@ const IndexProfileChips = ({ onLoaded, reloadKey, showMessage }) => {
             p.rerank ? "on" : "off"
           }. ${p.active ? "Active: kept up to date and queried." : "Inactive: turning it on marks it for the next indexing run; nothing is built now."}`}
           onToggle={(next) => toggle(p.name, next)}
+          onSettings={onEdit ? () => onEdit(p) : undefined}
         />
       ))}
       {error && <Hint sx={{ color: "error.main" }}>{error}</Hint>}

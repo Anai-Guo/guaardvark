@@ -69,6 +69,7 @@ import {
 } from "../components/settings/ui";
 import IndexProfileChips from "../components/settings/IndexProfileChips";
 import RebuildIndexDialog from "../components/settings/RebuildIndexDialog";
+import IndexProfileEditDialog from "../components/settings/IndexProfileEditDialog";
 import RefreshIcon from "@mui/icons-material/Refresh";
 import { useTheme, useMediaQuery } from "@mui/material";
 import { useSnackbar } from "../components/common/SnackbarProvider";
@@ -338,6 +339,7 @@ const SettingsPage = () => {
   // "rules" clears rules the chat learned; "log" empties the behaviour log file.
   const [learningClear, setLearningClear] = useState(null);
   const [learningBusy, setLearningBusy] = useState(false);
+  const [editProfile, setEditProfile] = useState(null);
 
   // RAG Autoresearch settings state
   const [autoresearchSettings, setAutoresearchSettings] = useState({});
@@ -2925,6 +2927,7 @@ const SettingsPage = () => {
           onLoaded={setIndexProfiles}
           reloadKey={profilesReloadKey}
           showMessage={showMessage}
+          onEdit={setEditProfile}
         />
       </Cluster>
       <Cluster label="Indexing">
@@ -3635,6 +3638,15 @@ const SettingsPage = () => {
           learningClear === "rules" ? "Clear learned rules" : "Clear log"
         }
         busy={learningBusy}
+      />
+      <IndexProfileEditDialog
+        open={editProfile !== null}
+        profile={editProfile}
+        onClose={() => setEditProfile(null)}
+        onSaved={(message) => {
+          showMessage(message, "success");
+          setProfilesReloadKey((k) => k + 1);
+        }}
       />
       <RebuildIndexDialog
         open={rebuildDialogOpen}
