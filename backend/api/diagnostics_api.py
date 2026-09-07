@@ -236,10 +236,7 @@ def test_llm_endpoint():
     # Fast connectivity test: cap output and disable chain-of-thought so thinking
     # models (gemma4:12b, qwen3, ...) don't spend the whole test reasoning before
     # answering (an uncapped "ping" was ~6.5s on gemma4:12b; this is ~0.3s).
-    _thinking = any(
-        p in model_name.lower()
-        for p in ("deepseek-r1", "thinking", "gemma4", "gemma-4", "qwen3")
-    )
+    from backend.utils.ollama_resource_manager import think_payload
     start = time.monotonic()
     try:
         import ollama as _ollama
@@ -250,8 +247,7 @@ def test_llm_endpoint():
             stream=False,
             options={"num_predict": 32},
         )
-        if _thinking:
-            _kwargs["think"] = False  # only thinking-capable models accept `think`
+        _kwargs.update(think_payload(model_name))  # only thinking-capable models accept `think`
         r = _ollama.chat(**_kwargs)
         msg = r.get("message", {}) if isinstance(r, dict) else getattr(r, "message", {})
         resp = (msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")) or ""

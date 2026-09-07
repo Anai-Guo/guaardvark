@@ -46,6 +46,7 @@ def document_text(doc) -> str:
         return ""
     return text
 from backend.services.rag_experiment_agent import _extract_json
+from backend.utils.text_cut import cut_on_whitespace
 
 logger = logging.getLogger(__name__)
 
@@ -508,7 +509,7 @@ class RAGEvalHarness:
             context_blocks = []
             for r in results:
                 source = (r.get("metadata") or {}).get("source_filename", "Unknown")
-                context_blocks.append(f"[Source: {source}]\n{r.get('text', '')[:500]}")
+                context_blocks.append(f"[Source: {source}]\n{cut_on_whitespace(r.get('text', ''), 500)}")
             context = "\n\n".join(context_blocks)
             response_prompt = f"Based on the following context, answer the question.\n\nContext:\n{context}\n\nQuestion: {pair['question']}\n\nAnswer:"
             actual_response = self._call_llm(response_prompt, temperature=0.0, role="answer")

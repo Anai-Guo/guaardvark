@@ -299,3 +299,47 @@ class TestRefreshContextWindow:
             llm = orm.build_ollama("gemma4:12b", base_url="http://localhost:11434", context_window=4096)
         assert llm.context_window == 4096
         assert not orm.is_provisional(llm)
+
+
+class TestThinkingDefault:
+    """Thinking is off unless a caller asks for it, and only for models that reason."""
+
+    def test_name_pattern_answers_without_a_show_request(self):
+        with patch.object(orm, "get_model_info", side_effect=AssertionError("no I/O")):
+            assert orm.model_supports_thinking("gemma4:12b")
+            assert orm.model_supports_thinking("qwen3.5:9b")
+            assert orm.model_supports_thinking("deepseek-r1:8b")
+
+    def test_capabilities_decide_for_an_unknown_name(self):
+        with patch.object(orm, "get_model_info", return_value={"capabilities": ["completion", "thinking"]}):
+            assert orm.model_supports_thinking("newfamily:7b")
+        with patch.object(orm, "get_model_info", return_value={"capabilities": ["completion"]}):
+            assert not orm.model_supports_thinking("newfamily:7b")
+
+    def test_unreachable_ollama_means_no_flag(self):
+        with patch.object(orm, "get_model_info", return_value=None):
+            assert not orm.model_supports_thinking("llama3:latest")
+            assert orm.thinking_kwargs("llama3:latest") == {}
+            assert orm.think_payload("llama3:latest") == {}
+        assert not orm.model_supports_thinking("")
+
+    def test_kwarg_shapes_for_a_thinking_model(self):
+        assert orm.thinking_kwargs("gemma4:12b") == {"thinking": False}
+        assert orm.think_payload("gemma4:12b") == {"think": False}
+
+    def test_build_ollama_turns_thinking_off_by_default(self):
+        with patch.object(orm, "get_model_info", return_value=None):
+            llm = orm.build_ollama("gemma4:12b", base_url="http://localhost:11434")
+        assert llm.thinking is False
+
+    def test_build_ollama_leaves_other_models_alone(self):
+        with patch.object(orm, "get_model_info", return_value=None):
+            llm = orm.build_ollama("llama3:latest", base_url="http://localhost:11434")
+        assert llm.thinking is None
+
+    def test_explicit_thinking_wins(self):
+        with patch.object(orm, "get_model_info", return_value=None):
+            on = orm.build_ollama("gemma4:12b", base_url="http://localhost:11434", thinking=True)
+            model_default = orm.build_ollama("gemma4:12b", base_url="http://localhost:11434", thinking=None)
+        assert on.thinking is True
+        assert model_default.thinking is None

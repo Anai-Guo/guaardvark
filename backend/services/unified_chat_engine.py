@@ -19,6 +19,7 @@ from typing import Dict, List, Any, Optional, Callable
 
 logger = logging.getLogger(__name__)
 
+from backend.utils.text_cut import cut_on_whitespace
 from backend.utils.llm_debug_logger import (
     log_system_prompt, log_user_message, log_llm_response,
     log_tool_call, log_tool_result, log_guard_event, log_decision,
@@ -2435,7 +2436,7 @@ class UnifiedChatEngine:
                     )
                 # Cap tool result text to reduce context bloat between iterations
                 if len(formatted) > 500:
-                    formatted = formatted[:500] + "... [truncated]"
+                    formatted = cut_on_whitespace(formatted, 500) + "... [truncated]"
                 observation_text += formatted + "\n"
 
             # Append any blocked-call observations
@@ -3483,10 +3484,13 @@ class UnifiedChatEngine:
         done_reason = None
         self._last_llm_call_meta = {"thinking": "", "done_reason": None, "truncated": False}
 
-        # Detect thinking models (gemma4, deepseek-r1, etc.) that put output
+        # Detect thinking models (gemma4, qwen3, deepseek-r1, ...) that put output
         # in the "thinking" field and may crash Ollama's JSON serializer
         # when thinking content contains XML-like tags. (N/A for cloud providers.)
-        is_thinking_model = (not _use_cloud) and any(t in model_name.lower() for t in ("deepseek-r1", "thinking", "gemma4", "gemma-4"))
+        # One predicate for the whole product: name patterns, then Ollama's
+        # capabilities list, so a model the pattern list has not met still counts.
+        from backend.utils.ollama_resource_manager import model_supports_thinking
+        is_thinking_model = (not _use_cloud) and model_supports_thinking(model_name)
         think_on = is_thinking_model and bool(getattr(self, "_think", False))
 
         # Track <think>...</think> blocks in the content stream so we can
@@ -3795,12 +3799,17 @@ class UnifiedChatEngine:
                 logger.warning(f"Thinking model serialization error, retrying with sanitized prompt: {error_str}")
                 try:
                     sanitized = self._sanitize_messages_for_thinking_model(messages, aggressive=True)
-                    stream = ollama.chat(
+                    # The retry keeps the turn's thinking choice; rebuilding the
+                    # kwargs without it would hand the model its own default (on).
+                    _sanitized_kwargs = dict(
                         model=model_name,
                         messages=sanitized,
                         stream=True,
                         options=opts,
                     )
+                    if getattr(self, "_think", None) is not None:
+                        _sanitized_kwargs["think"] = bool(self._think)
+                    stream = ollama.chat(**_sanitized_kwargs)
                     for chunk in stream:
                         if is_aborted(session_id):
                             break
@@ -4166,12 +4175,12 @@ class UnifiedChatEngine:
             chunks = []
             for r in results or []:
                 source = r.get("metadata", {}).get("source_filename", "Unknown")
-                text = r.get("text", "")[:500]
+                text = cut_on_whitespace(r.get("text", ""), 500)
                 chunks.append(f"[Source: {source}]\n{text}")
             try:
                 from backend.services.knowledge_sources import retrieve_from_sources
                 for hit in retrieve_from_sources(query):
-                    chunks.append(f"[Source: {hit['title']}]\n{hit['snippet'][:500]}")
+                    chunks.append(f"[Source: {hit['title']}]\n{cut_on_whitespace(hit['snippet'], 500)}")
             except Exception as e:
                 logger.debug(f"Knowledge source retrieval skipped: {e}")
             return "\n\n".join(chunks)

@@ -836,13 +836,15 @@ def switch_active_model(new_model_name: str):
 
     # Load NEW model FIRST — old model stays as fallback until new one is confirmed
     logger.info(f"Creating new Ollama instance for model: {new_model_name} (num_ctx={num_ctx})")
+    from backend.utils.ollama_resource_manager import thinking_kwargs
     new_llm = Ollama(
         model=new_model_name,
         base_url=OLLAMA_BASE_URL,
         request_timeout=120.0,
         temperature=0.4,
         context_window=num_ctx,
-        additional_kwargs={"num_ctx": num_ctx, "top_p": 0.8, "top_k": 30}
+        additional_kwargs={"num_ctx": num_ctx, "top_p": 0.8, "top_k": 30},
+        **thinking_kwargs(new_model_name),
     )
     new_llm.complete("Test.")
     logger.info(f"Successfully created and tested Ollama instance for {new_model_name}")
@@ -1048,13 +1050,15 @@ def _switch_model_background(app, new_model_name: str):
 
             # --- Load NEW model FIRST (old model stays as fallback) ---
             logger.info(f"Creating new Ollama instance for model: {new_model_name} (num_ctx={num_ctx})")
+            from backend.utils.ollama_resource_manager import thinking_kwargs
             new_llm = Ollama(
                 model=new_model_name,
                 base_url=OLLAMA_BASE_URL,
                 request_timeout=300.0,
                 temperature=0.4,
                 context_window=num_ctx,
-                additional_kwargs={"num_ctx": num_ctx, "top_p": 0.8, "top_k": 30}
+                additional_kwargs={"num_ctx": num_ctx, "top_p": 0.8, "top_k": 30},
+                **thinking_kwargs(new_model_name),
             )
 
             socketio.emit("model_switch", {

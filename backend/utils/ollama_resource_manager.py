@@ -25,6 +25,19 @@ VISION_MODEL_PATTERNS = [
     r'gemma[\-_]?4',
 ]
 
+# Model families that reason in Ollama's hidden ``thinking`` channel before
+# answering. Ollama's own capabilities list (``/api/show``) is authoritative
+# when it can be fetched; these names cover a server that is not answering yet
+# and unit tests that never reach one. What each cost when left on:
+#   * gemma4 12B, chat, 2026-09-06: 1,163 tokens / ~40 s for a 554-char reply
+#     against 183 tokens / ~10 s for an 858-char reply with thinking off.
+#   * gemma4 12B, summarisation (raptor_service): ~45x slower, shorter output.
+#   * qwen3.5 9B, structured extraction: 2-4k reasoning tokens per call, enough
+#     to blow a 120 s request timeout.
+THINKING_MODEL_PATTERNS = [
+    r'deepseek-r1', r'thinking', r'gemma[\-_]?4', r'qwen3',
+]
+
 # Models that are vision-only (not suitable as default text LLM).
 # Omits natively multimodal models (Gemma 4) that handle both text and vision.
 NON_TEXT_MODEL_PATTERNS = [
@@ -316,6 +329,45 @@ def model_supports_tools(model_name: str) -> bool:
     if not info:
         return False
     return "tools" in info.get("capabilities", [])
+
+
+def model_supports_thinking(model_name: str) -> bool:
+    """Whether ``model_name`` reasons in Ollama's ``thinking`` channel.
+
+    A name match against :data:`THINKING_MODEL_PATTERNS` answers without any
+    I/O; otherwise Ollama's capabilities list decides. An unreachable server
+    or an unknown model is ``False``: the ``think`` request field is only sent
+    to models known to accept it.
+    """
+    if not model_name:
+        return False
+    lower = model_name.lower()
+    if any(re.search(p, lower) for p in THINKING_MODEL_PATTERNS):
+        return True
+    info = get_model_info(model_name)
+    if not info:
+        return False
+    return "thinking" in (info.get("capabilities") or [])
+
+
+def thinking_kwargs(model_name: str) -> dict:
+    """Constructor kwargs that turn thinking off for a llama-index ``Ollama``.
+
+    ``{"thinking": False}`` for a thinking-capable model, ``{}`` for any other,
+    so ``Ollama(model=name, **thinking_kwargs(name))`` never sends a flag a
+    model does not accept. Spread it last; a caller that wants the model's own
+    default passes ``thinking=None`` explicitly instead of using this.
+    """
+    return {"thinking": False} if model_supports_thinking(model_name) else {}
+
+
+def think_payload(model_name: str) -> dict:
+    """The raw-API twin of :func:`thinking_kwargs`: ``{"think": False}`` or ``{}``.
+
+    For ``ollama.chat(**kw)``, ``ollama.Client().generate(**kw)`` and hand-built
+    ``/api/chat`` or ``/api/generate`` request bodies.
+    """
+    return {"think": False} if model_supports_thinking(model_name) else {}
 
 
 def overhead_profile(model_name: str, model_info: Optional[dict] = None) -> OverheadProfile:
@@ -631,9 +683,16 @@ def build_ollama(model_name: str, **kwargs):
     spread *after* the base kwargs in the library's ``_model_kwargs``, so a
     caller-supplied ``additional_kwargs`` would otherwise be able to silently
     reintroduce an unbounded value.
+
+    ``thinking`` defaults to off for thinking-capable models (see
+    :data:`THINKING_MODEL_PATTERNS` for what leaving it on cost). A caller that
+    passes ``thinking`` explicitly, ``None`` included, is left alone: the chat
+    page's per-chat toggle and any deliberate choice still win.
     """
     from llama_index.llms.ollama import Ollama
 
+    if "thinking" not in kwargs:
+        kwargs.update(thinking_kwargs(model_name))
     explicit = kwargs.pop("context_window", None)
     if explicit is not None:
         decision = NumCtxDecision(int(explicit), resolved=True)

@@ -4,6 +4,25 @@
 
 Everything the H3 release can do, wired through the product, on a branch until it merges.
 
+- **Thinking is off unless someone asks for it, everywhere the product talks to Ollama.**
+  The Chat page's "Chat thinking" setting was documented as off by default while the stored
+  value said on, so every reply on this box and on a client's box paid for gemma4's hidden reasoning:
+  the same question measured at 1,163 generated tokens and about 40 s for a 554-character
+  answer with thinking on, 183 tokens and about 10 s for an 858-character answer with it off.
+  Outside the Chat page nothing set the flag at all, and a thinking model given a token cap
+  can spend the whole cap reasoning and hand back an empty answer (the agent's narration
+  fallback, an 800-token call, did exactly that). One predicate now decides which models
+  reason, `model_supports_thinking` in `backend/utils/ollama_resource_manager.py`, by name
+  pattern and then by Ollama's own capabilities list, so qwen3 is covered and a family the
+  list has not met is still caught. `build_ollama` turns thinking off for those models unless
+  the caller passes `thinking` itself; `get_llm_instance(model=...)` accepts `thinking`,
+  `request_timeout`, `json_mode`, `num_ctx` and `num_predict` like the RoofBrain build already
+  did; the model-switch and startup instances, the brain's capability probe, the diagnostics
+  ping and the agent's narration fallback all go through the same helper. The Chat page's
+  per-chat `/thinking on` still wins, and the retry after an Ollama serializer crash now keeps
+  that choice instead of silently reasoning again. Retrieved context handed to the chat model
+  is cut on whitespace (`backend/utils/text_cut.py`): a 500-character slice through "4:12"
+  left "4:1" in a prompt and the model repeated it as fact.
 - **One active video model for every pipeline.** Chat `/video`, `videos generate` in the CLI,
   batch requests that omit a model, the music video and Film Crew all pick their model through
   one resolver: an explicit id, else a per-pipeline override, else the global setting at

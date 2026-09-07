@@ -214,3 +214,22 @@ class TestThinkingBudget:
         prompt_estimate = uce.UnifiedChatEngine._estimate_tokens(seen["messages"])
         assert 100 <= num_predict
         assert prompt_estimate + num_predict <= 600
+
+
+class TestSanitizedRetry:
+    def test_retry_after_serializer_crash_keeps_thinking_off(self, engine):
+        engine._think = False
+        calls = []
+
+        def chat(**kw):
+            calls.append(kw)
+            if len(calls) == 1:
+                raise RuntimeError("invalid character 'x' looking for beginning of value")
+            yield {"message": {"content": ANSWER_TEXT}}
+            yield _done()
+
+        (content, _, _), _ = _stream(engine, chat)
+
+        assert content == ANSWER_TEXT
+        assert calls[0]["think"] is False
+        assert calls[1]["think"] is False, "the sanitized retry rebuilt kwargs without think"
