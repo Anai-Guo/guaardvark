@@ -48,6 +48,7 @@ import DescriptionIcon from "@mui/icons-material/Description";
 import BugReportIcon from "@mui/icons-material/BugReport";
 import BarChartIcon from "@mui/icons-material/BarChart";
 import DesktopWindowsIcon from "@mui/icons-material/DesktopWindows";
+import MemoryIcon from "@mui/icons-material/Memory";
 
 export const NAV_CHROME = Object.freeze({
   SIDEBAR: "sidebar",
@@ -340,6 +341,16 @@ export const CORE_NAV_CATALOG = Object.freeze([
     menu: "Agents",
     workspace: "agents",
     stripOrder: 10,
+  }),
+  page({
+    id: "agent-memory",
+    path: "/agents/memory",
+    label: "Agent Memory",
+    icon: <MemoryIcon />,
+    sidebarGroup: "Configuration",
+    menu: "Agents",
+    workspace: "agents",
+    stripOrder: 15,
   }),
   page({
     id: "filegen",

@@ -36,6 +36,7 @@ const DocumentsPage = lazy(() => import("./pages/DocumentsPage"));
 const RulesPage = lazy(() => import("./pages/RulesPage"));
 const ToolsPage = lazy(() => import("./pages/ToolsPage"));
 const AgentsPage = lazy(() => import("./pages/AgentsPage"));
+const AgentMemoryPage = lazy(() => import("./pages/AgentMemoryPage"));
 const WebsitesPage = lazy(() => import("./pages/WebsitesPage"));
 const WebsiteDetailPage = lazy(() => import("./pages/WebsiteDetailPage"));
 const FileGenerationPage = lazy(() => import("./pages/FileGenerationPage"));
@@ -466,6 +467,14 @@ const AppContainer = () => {
                         element={
                           <AppLayout>
                             <AgentsPage />
+                          </AppLayout>
+                        }
+                      />
+                      <Route
+                        path="/agents/memory"
+                        element={
+                          <AppLayout>
+                            <AgentMemoryPage />
                           </AppLayout>
                         }
                       />

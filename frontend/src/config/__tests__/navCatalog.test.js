@@ -51,6 +51,7 @@ describe("catalogToNavGroups", () => {
       ["Configuration", "Rules & Prompts", "/rules", null],
       ["Configuration", "Agent Tools", "/tools", null],
       ["Configuration", "Agents", "/agents", null],
+      ["Configuration", "Agent Memory", "/agents/memory", null],
       ["Configuration", "FileGen", "/file-generation", null],
       ["Configuration", "CSVGen", "/content-library", null],
       ["Configuration", "Swarm", "/swarm", null],

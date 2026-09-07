@@ -1,18 +1,9 @@
 import React, { useEffect, useState } from "react";
-import {
-  Box,
-  Button,
-  FormControl,
-  InputLabel,
-  MenuItem,
-  Select,
-  Typography,
-  Alert,
-} from "@mui/material";
+import { Alert, FormControl, InputLabel, MenuItem, Select } from "@mui/material";
 import { getProfile, setProfile as saveProfile } from "../../api/settingsService";
 import { useAppStore } from "../../stores/useAppStore";
 import { useSnackbar } from "../common/SnackbarProvider";
-import SettingsRow from "./SettingsRow";
+import { ActionButton, Cluster, Hint, Line } from "./ui";
 
 /**
  * Product Profile — one switch that sets the product shape.
@@ -52,6 +43,7 @@ const ProfileSection = () => {
   const chosen = available.find((p) => p.name === selected);
   const activeName = info?.active?.name || activeProfile?.name;
   const changed = Boolean(info) && selected !== (info.configured || activeName);
+  const locked = Boolean(info) && !info.env_writable;
 
   const handleApply = async () => {
     setSaving(true);
@@ -72,62 +64,57 @@ const ProfileSection = () => {
   }
 
   return (
-    <>
-      <SettingsRow label="Profile">
-        <Box sx={{ display: "flex", gap: 1, alignItems: "center", flexWrap: "wrap" }}>
-          <FormControl size="small" sx={{ minWidth: 220 }}>
-            <InputLabel id="product-profile-label">Profile</InputLabel>
-            <Select
-              labelId="product-profile-label"
-              label="Profile"
-              value={available.some((p) => p.name === selected) ? selected : ""}
-              onChange={(e) => setSelected(e.target.value)}
-              disabled={!info || saving || !info.env_writable}
-            >
-              {available.map((p) => (
-                <MenuItem key={p.name} value={p.name}>
-                  {p.label}
-                  {p.source === "extension" ? " (extension)" : ""}
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-          <Button
-            variant="contained"
-            size="small"
-            onClick={handleApply}
-            disabled={!changed || saving || !info?.env_writable}
+    <Cluster label="Product profile" note={locked ? "set by .env" : "applies after a restart"}>
+      <Line nowrap>
+        <FormControl size="small" className="grow" disabled={!info || saving || locked}>
+          <InputLabel id="product-profile-label">Profile</InputLabel>
+          <Select
+            labelId="product-profile-label"
+            label="Profile"
+            value={available.some((p) => p.name === selected) ? selected : ""}
+            onChange={(e) => setSelected(e.target.value)}
           >
-            {saving ? "Saving..." : "Apply"}
-          </Button>
-        </Box>
-      </SettingsRow>
-      {chosen?.description && (
-        <Typography variant="body2" color="text.secondary" sx={{ px: 1.5, pb: 1 }}>
-          {chosen.description}
-        </Typography>
-      )}
-      {info && !info.env_writable && (
-        <Alert severity="info" sx={{ mx: 1.5, mb: 1 }}>
-          The profile is set by <code>GUAARDVARK_PROFILE</code> in <code>.env</code>, which this
-          server cannot write. Edit the file or start with <code>./start.sh --profile NAME</code>.
+            {available.map((p) => (
+              <MenuItem key={p.name} value={p.name}>
+                {p.label}
+                {p.source === "extension" ? " (extension)" : ""}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+        {/* Primary only while a change is pending; otherwise nothing to commit. */}
+        <ActionButton
+          kind={changed ? "primary" : "neutral"}
+          onClick={handleApply}
+          loading={saving}
+          disabled={!changed || locked}
+          tooltip={locked ? "Set by GUAARDVARK_PROFILE in .env" : ""}
+        >
+          Apply
+        </ActionButton>
+      </Line>
+      <Hint>
+        {chosen?.description ? `${chosen.description} ` : ""}
+        A profile decides what is listed and what is on by default. Nothing is removed: every page
+        stays reachable by its address, and explicit settings in <code>.env</code> always win.
+      </Hint>
+      {locked && (
+        <Alert severity="info" sx={{ py: 0.25 }}>
+          The profile is set by <code>GUAARDVARK_PROFILE</code> in <code>.env</code>, which this server
+          cannot write. Edit the file or start with <code>./start.sh --profile NAME</code>.
         </Alert>
       )}
       {info?.active?.fallback_reason && (
-        <Alert severity="warning" sx={{ mx: 1.5, mb: 1 }}>
+        <Alert severity="warning" sx={{ py: 0.25 }}>
           {info.active.fallback_reason}
         </Alert>
       )}
       {restartNeeded && (
-        <Alert severity="warning" sx={{ mx: 1.5, mb: 1 }}>
+        <Alert severity="warning" sx={{ py: 0.25 }}>
           Restart Guaardvark to apply the new profile. Running now: {activeName}.
         </Alert>
       )}
-      <Typography variant="caption" color="text.secondary" sx={{ px: 1.5, pb: 1, display: "block" }}>
-        A profile decides what is listed and what is on by default. Nothing is removed — every page
-        stays reachable by its address, and explicit settings in <code>.env</code> always win.
-      </Typography>
-    </>
+    </Cluster>
   );
 };
 

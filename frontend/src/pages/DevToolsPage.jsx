@@ -47,6 +47,8 @@ import {
 import { getProgressJobs, cleanupStuckJobs } from "../api/progressService";
 import { triggerReboot } from "../api/settingsService";
 import AlertSnackbar from "../components/common/AlertSnackbar";
+import DiagnosticsPanel from "../components/system/DiagnosticsPanel";
+import RAGDebugSection from "../components/settings/RAGDebugSection";
 import SystemMetricsBar from "../components/layout/SystemMetricsBar";
 import { activateResourceManager } from "../utils/resource_manager";
 import { io } from "socket.io-client";
@@ -144,6 +146,10 @@ const DevToolsPage = () => {
 
   const handleCloseSnackbar = () =>
     setSnackbar((prev) => ({ ...prev, open: false }));
+
+  const showMessage = useCallback((message, severity = "info") => {
+    setSnackbar({ open: true, message, severity });
+  }, []);
 
   const handleRetry = () => {
     setHealthError(null);
@@ -1265,6 +1271,26 @@ const DevToolsPage = () => {
                   Run a self-test to see detailed system diagnostics
                 </Typography>
               )}
+            </CardContent>
+          </Card>
+        </Grid>
+        <Grid item xs={12}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Diagnostics
+              </Typography>
+              <DiagnosticsPanel showMessage={showMessage} />
+            </CardContent>
+          </Card>
+        </Grid>
+        <Grid item xs={12}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Retrieval debug
+              </Typography>
+              <RAGDebugSection />
             </CardContent>
           </Card>
         </Grid>
