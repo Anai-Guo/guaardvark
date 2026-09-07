@@ -1024,6 +1024,11 @@ const SettingsPage = () => {
       }
     };
     fetchImageGenStatus();
+    // ComfyUI can be started from the Plugins page while this one is open.
+    const timer = setInterval(() => {
+      if (!document.hidden) fetchImageGenStatus();
+    }, 30000);
+    return () => clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -1643,25 +1648,52 @@ const SettingsPage = () => {
     );
   };
 
-  const handleAdvancedDebugToggle = (event) => {
-    const isEnabled = deriveToggleValue(event, advancedDebug);
-    setAdvancedDebug(isEnabled);
+  // A toggle that mirrors to localStorage for first paint and persists to the
+  // server. On failure both roll back, so the chip never shows a state the
+  // server does not have.
+  const persistToggle = async ({
+    next,
+    previous,
+    setState,
+    storageKey,
+    save,
+    onText,
+    offText,
+  }) => {
+    setState(next);
     try {
-      localStorage.setItem(ADV_DEBUG_ENABLED_KEY, String(isEnabled));
-      apiService
-        .setAdvancedDebug(isEnabled)
-        .catch((err) =>
-          console.warn("Failed to update advanced debug setting:", err),
-        );
-    } catch (e) {
-      console.warn("Failed to persist advanced debug setting:", e);
+      localStorage.setItem(storageKey, String(next));
+    } catch {
+      // non-fatal
     }
-    debugLog("Advanced Debug toggled", { isEnabled });
-    showMessage(
-      `Advanced debugging ${isEnabled ? "enabled" : "disabled"}.`,
-      "info",
-    );
+    try {
+      const result = await save(next);
+      if (result?.error) throw new Error(result.error.message || result.error);
+      showMessage(next ? onText : offText, "info");
+    } catch (err) {
+      setState(previous);
+      try {
+        localStorage.setItem(storageKey, String(previous));
+      } catch {
+        // non-fatal
+      }
+      showMessage(
+        `Could not save: ${err.message}. The setting was not changed.`,
+        "error",
+      );
+    }
   };
+
+  const handleAdvancedDebugToggle = (event) =>
+    persistToggle({
+      next: deriveToggleValue(event, advancedDebug),
+      previous: advancedDebug,
+      setState: setAdvancedDebug,
+      storageKey: ADV_DEBUG_ENABLED_KEY,
+      save: apiService.setAdvancedDebug,
+      onText: "Verbose logging enabled.",
+      offText: "Verbose logging disabled.",
+    });
   const handleVerbatimPromptsToggle = (event) => {
     if (verbatimForcedByEnv) {
       showMessage(
@@ -1684,42 +1716,26 @@ const SettingsPage = () => {
       "info",
     );
   };
-  const handleLlmDebugToggle = (event) => {
-    const isEnabled = deriveToggleValue(event, llmDebug);
-    setLlmDebugState(isEnabled);
-    try {
-      localStorage.setItem(LLM_DEBUG_ENABLED_KEY, String(isEnabled));
-      apiService
-        .setLlmDebug(isEnabled)
-        .catch((err) =>
-          console.warn("Failed to update LLM debug setting:", err),
-        );
-    } catch (e) {
-      console.warn("Failed to persist LLM debug setting:", e);
-    }
-    showMessage(
-      `LLM debug logging ${isEnabled ? "enabled" : "disabled"}.`,
-      "info",
-    );
-  };
-  const handleBehaviorLearningToggle = (event) => {
-    const isEnabled = deriveToggleValue(event, behaviorLearningEnabled);
-    setBehaviorLearningEnabled(isEnabled);
-    try {
-      localStorage.setItem(BEHAVIOR_LEARNING_ENABLED_KEY, String(isEnabled));
-      apiService
-        .setBehaviorLearning(isEnabled)
-        .catch((err) =>
-          console.warn("Failed to update behavior learning setting:", err),
-        );
-    } catch (e) {
-      console.warn("Failed to persist behavior learning setting:", e);
-    }
-    showMessage(
-      `Behavior learning ${isEnabled ? "enabled" : "disabled"}.`,
-      "info",
-    );
-  };
+  const handleLlmDebugToggle = (event) =>
+    persistToggle({
+      next: deriveToggleValue(event, llmDebug),
+      previous: llmDebug,
+      setState: setLlmDebugState,
+      storageKey: LLM_DEBUG_ENABLED_KEY,
+      save: apiService.setLlmDebug,
+      onText: "LLM debug logging enabled.",
+      offText: "LLM debug logging disabled.",
+    });
+  const handleBehaviorLearningToggle = (event) =>
+    persistToggle({
+      next: deriveToggleValue(event, behaviorLearningEnabled),
+      previous: behaviorLearningEnabled,
+      setState: setBehaviorLearningEnabled,
+      storageKey: BEHAVIOR_LEARNING_ENABLED_KEY,
+      save: apiService.setBehaviorLearning,
+      onText: "Behaviour learning enabled.",
+      offText: "Behaviour learning disabled.",
+    });
 
   // --- NEW HANDLERS FOR IMPORT/EXPORT ---
   const handleExportRulesClick = async () => {

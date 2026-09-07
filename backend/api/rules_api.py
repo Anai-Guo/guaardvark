@@ -70,7 +70,7 @@ def get_rule(rule_id):
     rule = db.session.get(Rule, rule_id)
     if not rule:
         return error_response("Rule not found", 404, "NOT_FOUND")
-    return success_response("Rule retrieved", rule.to_dict())
+    return success_response(rule.to_dict(), "Rule retrieved")
 
 
 @rules_bp.route("", methods=["POST"])
@@ -139,7 +139,7 @@ def create_rule():
         )
         db.session.add(rule)
         db.session.commit()
-        return success_response("Rule created", {"id": rule.id}, 201)
+        return success_response({"id": rule.id}, "Rule created", 201)
     except IntegrityError as e:
         db.session.rollback()
         return error_response(

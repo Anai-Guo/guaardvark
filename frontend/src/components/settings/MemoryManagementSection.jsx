@@ -463,6 +463,11 @@ const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon />
                       </Box>
                     </TableCell>
                     <TableCell align="right" onClick={(e) => e.stopPropagation()}>
+                      {memory.status !== "active" && (
+                        <Button size="small" color="success" onClick={() => handleStatusChange(memory, "active")}>
+                          Restore
+                        </Button>
+                      )}
                       <Button
                         size="small"
                         onClick={() => handleStatusChange(memory, "archived")}

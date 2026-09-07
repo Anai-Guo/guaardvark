@@ -255,23 +255,20 @@ def list_models():
     models_data = get_available_ollama_models(use_cache=True, force_refresh=force_refresh)
     if isinstance(models_data, dict) and models_data.get("error"):
         if models_data.get("offline"):
-            return success_response(
-                "Ollama offline",
-                {"models": [], "ollama_offline": True},
-            )
+            return success_response({"models": [], "ollama_offline": True}, "Ollama offline")
         return error_response(models_data["error"], 502, "OLLAMA_ERROR")
     logger.info(f"Returning {len(models_data)} available models from Ollama.")
-    return success_response("Models retrieved", {"models": models_data})
+    return success_response({"models": models_data}, "Models retrieved")
 
 
 @model_bp.route("/loaded", methods=["GET"])
 def list_loaded_models():
     """API endpoint to list currently loaded models in Ollama memory."""
     loaded = get_loaded_models()
-    return success_response("Loaded models retrieved", {
+    return success_response({
         "models": loaded,
         "count": len(loaded)
-    })
+    }, "Loaded models retrieved")
 
 
 @model_bp.route("/unload", methods=["POST"])
@@ -284,11 +281,11 @@ def unload_models():
     if unload_all:
         keep_model = data.get("keep")
         count = unload_all_except(keep_model)
-        return success_response(f"Unloaded {count} models", {"unloaded_count": count})
+        return success_response({"unloaded_count": count}, f"Unloaded {count} models")
     elif model_name:
         success = unload_model_from_ollama(model_name)
         if success:
-            return success_response(f"Unloaded model {model_name}", {"model": model_name})
+            return success_response({"model": model_name}, f"Unloaded model {model_name}")
         else:
             return error_response(f"Failed to unload model {model_name}", 500, "UNLOAD_FAILED")
     else:
@@ -310,11 +307,11 @@ def list_vision_models():
         vision_models = get_available_vision_models()
         
         logger.info(f"Returning {len(vision_models)} vision models")
-        return success_response("Vision models retrieved", {
+        return success_response({
             "vision_models": vision_models,
             "count": len(vision_models),
             "cache_refreshed": force_refresh
-        })
+        }, "Vision models retrieved")
         
     except Exception as e:
         logger.error(f"Error listing vision models: {e}", exc_info=True)
@@ -330,10 +327,10 @@ def check_vision_capability(model_name):
         is_vision_capable = is_vision_model(model_name)
         
         logger.debug(f"Vision capability check for '{model_name}': {is_vision_capable}")
-        return success_response("Vision capability checked", {
+        return success_response({
             "model_name": model_name,
             "is_vision_capable": is_vision_capable
-        })
+        }, "Vision capability checked")
         
     except Exception as e:
         logger.error(f"Error checking vision capability for '{model_name}': {e}", exc_info=True)
@@ -353,7 +350,7 @@ def get_current_model():
             logger.info(
                 f"Returning current active model from LlamaIndex Settings: {model_name}"
             )
-            return success_response("Current model retrieved", {"model": model_name})
+            return success_response({"model": model_name}, "Current model retrieved")
         else:
             llm_from_config = current_app.config.get("LLAMA_INDEX_LLM")
             if llm_from_config and hasattr(llm_from_config, "model"):
@@ -361,7 +358,7 @@ def get_current_model():
                 logger.warning(
                     f"LLM not found in Settings, returning model from app config: {model_name}"
                 )
-                return success_response("Current model retrieved", {"model": model_name})
+                return success_response({"model": model_name}, "Current model retrieved")
             else:
                 logger.error(
                     "Could not determine active model from Settings or app config."
@@ -390,7 +387,7 @@ def model_health():
     except requests.RequestException as e:
         logger.error("Model health check failed: %s", e)
         return error_response(str(e), 503, "HEALTH_CHECK_FAILED")
-    return success_response("Model health checked", {"active_model": model_name, "available": available})
+    return success_response({"active_model": model_name, "available": available}, "Model health checked")
 
 
 @model_bp.route("/status", methods=["GET"])
@@ -474,7 +471,7 @@ def model_status():
         }
 
         logger.info(f"Model status: {status_data}")
-        return success_response("Model status retrieved", status_data)
+        return success_response(status_data, "Model status retrieved")
 
     except Exception as e:
         logger.error(f"Error getting model status: {e}", exc_info=True)
@@ -568,7 +565,7 @@ def get_resources():
         pass
     logger.debug("RESOURCES: router check done (stats=%s)", "present" if router_stats else "none")
 
-    return success_response("Resources retrieved", {
+    return success_response({
         "gpu": {
             "total_mb": round(gpu_total),
             "used_mb": round(gpu_used),
@@ -582,7 +579,7 @@ def get_resources():
         "loaded_models": loaded_summary,
         "embedding_model": embed_model_name,
         "embedding_router": router_stats,
-    })
+    }, "Resources retrieved")
 
 
 @model_bp.route("/embedding/list", methods=["GET"])
@@ -787,12 +784,12 @@ def set_embedding_model():
         except Exception as e:
             logger.warning(f"Failed to persist embedding model to DB: {e}")
 
-        return success_response(f"Embedding model switched to {model_name}", {
+        return success_response({
             "model": model_name,
             "dimensions": embed_dim,
             "previous_dimensions": prev_dim,
             "index_cleared": dimension_changed,
-        })
+        }, f"Embedding model switched to {model_name}")
 
     except Exception as e:
         logger.error(f"Failed to switch embedding model: {e}", exc_info=True)

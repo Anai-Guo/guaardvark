@@ -186,7 +186,17 @@ const AgentDisplaySection = ({ showMessage }) => {
     setControlAction('restart');
     showMessage?.('Restarting agent display…', 'info');
     try {
-      await stopDisplay({ force: true }).catch(() => {}); // tolerate stop failures (might already be down)
+      // A stop the backend refuses (409: an agent task or training holds the
+      // display) ends the restart here. Any other stop failure means it was
+      // already down, so the start still runs.
+      try {
+        await stopDisplay({ force: true });
+      } catch (stopErr) {
+        if (stopErr?.status === 409) {
+          showMessage?.(`Restart refused: ${stopErr.message}`, 'warning');
+          return;
+        }
+      }
       const startResult = await startDisplay();
       if (startResult.success) {
         showMessage?.('Agent display restarted.', 'success');

@@ -28,12 +28,12 @@ def _read_version() -> str:
 @system_bp.route("/version", methods=["GET"])
 def get_version():
     try:
-        return success_response("Version retrieved", {
+        return success_response({
             "version": _read_version(),
             "name": "guaardvark",
             "description": "LLM-powered development environment",
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        })
+        }, "Version retrieved")
     except Exception as e:
         logger.error(f"Error getting version: {e}")
         return error_response(str(e), 500, "VERSION_ERROR")
@@ -79,11 +79,11 @@ def cleanup_progress_jobs():
                 except (ValueError, IndexError):
                     pass
         
-        return success_response("Cleanup completed", {
+        return success_response({
             "cleaned_count": cleaned_count,
             "output": result.stdout,
             "executed": execute
-        })
+        }, "Cleanup completed")
         
     except subprocess.TimeoutExpired:
         return error_response("Cleanup script timed out", 500, "TIMEOUT")

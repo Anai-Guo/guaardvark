@@ -102,8 +102,8 @@ const RAGDebugSection = () => {
       </Box>
 
       {error && (
-        <Alert severity="info" sx={{ mb: 2 }}>
-          No RAG data available. Index some documents to see performance stats.
+        <Alert severity="warning" sx={{ mb: 2 }}>
+          Could not load retrieval health: {error}
         </Alert>
       )}
 
@@ -140,7 +140,7 @@ const RAGDebugSection = () => {
               </Typography>
 
               {systemHealth.health_issues?.length > 0 && (
-                <Alert severity="warning" size="small">
+                <Alert severity="warning">
                   <Typography variant="caption">
                     Issues: {systemHealth.health_issues.join(", ")}
                   </Typography>

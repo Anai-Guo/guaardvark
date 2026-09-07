@@ -161,7 +161,7 @@ async function handleModel(args, { addMessage }) {
       ]);
       const active = await activeRes.json();
       const list = await listRes.json();
-      const models = list?.message?.models || list?.data || [];
+      const models = list?.data?.models || list?.message?.models || list?.data || [];
       const modelNames = models.map((m) => m.name || m).slice(0, 20);
       addMessage({
         role: "system",
