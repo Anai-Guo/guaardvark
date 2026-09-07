@@ -521,9 +521,13 @@ def route_and_execute():
         if not is_error and result.get("type") == "agent_result" and result.get("success") is False:
             is_error = True
         agent_error = result.get("error") if result.get("type") == "agent_result" else None
+        # display_content is what was just persisted as the assistant turn;
+        # the client shows it first so a tool_result or file_generation shape
+        # (no final_answer field) is not reported as "no response".
         return jsonify({
             "success": not is_error,
             "result": result,
+            "display_content": display_content,
             **({"error": result.get("error") or agent_error} if is_error else {})
         }), 500 if is_error else 200
 

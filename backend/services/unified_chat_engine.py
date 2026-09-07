@@ -47,6 +47,56 @@ _REASONING_ONLY_FALLBACK_TEXT = (
     "The model produced reasoning but no final answer. Please try again, or turn "
     "thinking off with /thinking."
 )
+# Appended when the reply is the TOOLS block echoed back ("name(param:type, ...)")
+# instead of a tool call or an answer; the turn is repeated once with thinking off.
+_ANSWER_NOT_TOOL_LIST_NUDGE = (
+    "Your last reply repeated the tool list instead of answering. Either call one "
+    "tool in the tool_call format, or write the answer for the user as plain text. "
+    "Do not list tools."
+)
+# Shown when the repeat is another echo.
+_TOOL_LIST_ECHO_FALLBACK_TEXT = (
+    "The model echoed its tool list instead of answering. Please try again, or turn "
+    "thinking off with /thinking."
+)
+
+# A reply that opens with a tool signature the way the TOOLS prompt block prints
+# one: optional bracket or dash, a tool name, then "(param:type" ...
+_TOOL_SIGNATURE_RE = re.compile(r"^[\[\-\s]*([A-Za-z_]\w*)\(\s*[A-Za-z_]\w*\s*:\s*\w+\??")
+
+
+_TOOL_MARKERS = ("[tool_call]", "[tool]", "<tool_call>", "<tool>")
+
+
+def _split_pending_tool_marker(buf: str):
+    """Split ``buf`` into text safe to emit and a tail that may open tool markup.
+
+    Ollama streams "[tool_call]" as several tokens; once the buffer is
+    flushed, the "[tool_" already on screen cannot be taken back. The tail
+    from the last "[" or "<" stays buffered when it is a prefix of a marker.
+    """
+    cut = max(buf.rfind("["), buf.rfind("<"))
+    if cut < 0:
+        return buf, ""
+    tail = buf[cut:]
+    if any(m.startswith(tail) for m in _TOOL_MARKERS):
+        return buf[:cut], tail
+    return buf, ""
+
+
+def _looks_like_tool_list_echo(text: str, tool_names) -> bool:
+    """Whether ``text`` is the prompt's tool list echoed back, not an answer.
+
+    A small model sometimes replies with ``search_knowledge_base(query:string,
+    top_k:int?) ...``, the exact shape :func:`build_concise_tool_list` printed
+    for it. The tool-call parser finds nothing, so without this check the echo
+    is promoted to the final answer and saved to history.
+    """
+    if not text:
+        return False
+    m = _TOOL_SIGNATURE_RE.match(text.strip())
+    return bool(m) and m.group(1) in set(tool_names or ())
+
 TOOL_EMBEDDING_CACHE = os.path.join(CACHE_DIR, "tool_embeddings.json")
 
 # Abort flags for in-progress sessions
@@ -1881,6 +1931,7 @@ class UnifiedChatEngine:
         log_user_message("unified_chat", message, session_id=session_id)
 
         wrap_up_nudge_pushed = False
+        tool_list_echo_retried = False
         for iteration in range(1, self.max_iterations + 1):
             if is_aborted(session_id):
                 emit_fn("chat:complete", {
@@ -1994,8 +2045,26 @@ class UnifiedChatEngine:
                 tool_names = [tc.tool_name for tc in parsed.tool_calls]
                 logger.info(f"[UNIFIED_ENGINE] iter={iteration} TOOL_CALLS: {tool_names}")
             else:
-                logger.info(f"[UNIFIED_ENGINE] iter={iteration} NO tool calls, returning final answer")
                 final_text = parsed.final_answer or llm_response.strip()
+                # A tool-list echo is non-empty, so the reasoning-only retry in
+                # _call_llm_streaming never sees it; repeat the turn once here,
+                # thinking off, the same way. Per-request engine, so _think is
+                # safe to flip for the rest of this turn.
+                if _looks_like_tool_list_echo(
+                    final_text, [getattr(t, "name", t) for t in self.registry.list_tools()],
+                ):
+                    if not tool_list_echo_retried and not is_aborted(session_id):
+                        tool_list_echo_retried = True
+                        logger.info(
+                            f"[UNIFIED_ENGINE] iter={iteration} reply echoed the tool list "
+                            f"({len(final_text)} chars); re-asking with thinking off"
+                        )
+                        ollama_messages.append({"role": "system", "content": _ANSWER_NOT_TOOL_LIST_NUDGE})
+                        self._think = False
+                        continue
+                    final_text = _TOOL_LIST_ECHO_FALLBACK_TEXT
+                    emit_fn("chat:token", {"content": final_text, "session_id": session_id})
+                logger.info(f"[UNIFIED_ENGINE] iter={iteration} NO tool calls, returning final answer")
                 final_text = re.sub(r'\u003c/?(?:tool_call|tool|observation)[^\u003e]*\u003e', '', final_text).strip()
 
                 log_decision("unified_chat", "FINAL_ANSWER", {
@@ -2591,6 +2660,11 @@ class UnifiedChatEngine:
                 r'param_name|parameter|value|full_page|selector|format|max_results|'
                 r'analysis_type|include_metadata)[^>]*>',
                 '', accumulated_response
+            ).strip()
+            # The bracket form thinking models are prompted with, so a leaked
+            # [tool_call] never re-enters the model's context as history.
+            clean_response = re.sub(
+                r'\[/?(?:tool_call|tool|observation)[^\]]*\]', '', clean_response
             ).strip()
             # Collapse runs of whitespace left by tag removal
             clean_response = re.sub(r'\n{3,}', '\n\n', clean_response)
@@ -3681,9 +3755,13 @@ class UnifiedChatEngine:
                             # Use last 20 chunks to handle slow-chunk Ollama streams.
                             # On the native path tool calls are out-of-band (structured
                             # message.tool_calls), so this XML heuristic must never fire.
+                            # Thinking models are prompted with the bracket form
+                            # ([tool_call], [tool]) because their system prompt is
+                            # sanitized, so the suppressor must recognise both.
+                            _tail = "".join(accumulated[-20:])
                             if not _native_active and (
-                                "<tool_call" in "".join(accumulated[-20:])
-                                or "<tool>" in "".join(accumulated[-20:])
+                                "<tool_call" in _tail or "<tool>" in _tail
+                                or "[tool_call" in _tail or "[tool]" in _tail
                             ):
                                 xml_detected = True
                             else:
@@ -3701,9 +3779,12 @@ class UnifiedChatEngine:
                                             think_buffer = think_buffer.split("<think>", 1)[1]
                                             emit_token = None
                                         elif len(think_buffer) > 20:
-                                            # No <think> tag detected, flush buffer
-                                            emit_fn("chat:token", {"content": think_buffer, "session_id": session_id})
-                                            think_buffer = ""
+                                            # No <think> tag detected: flush, but keep a
+                                            # trailing "[tool_" / "<tool" that may be the
+                                            # start of tool markup arriving token by token.
+                                            _head, think_buffer = _split_pending_tool_marker(think_buffer)
+                                            if _head:
+                                                emit_fn("chat:token", {"content": _head, "session_id": session_id})
                                             emit_token = None
                                         else:
                                             # Still buffering, don't emit yet
@@ -3733,10 +3814,12 @@ class UnifiedChatEngine:
 
             def _visible_content() -> str:
                 nonlocal think_buffer
-                # Flush any remaining think_buffer (non-think text that was still buffered)
-                if think_buffer and not in_think_block and emit_tokens:
+                # Flush any remaining think_buffer (non-think text that was still
+                # buffered). Not when tool markup was detected: the buffer then
+                # holds the opening characters of that markup ("[tool_").
+                if think_buffer and not in_think_block and emit_tokens and not xml_detected:
                     emit_fn("chat:token", {"content": think_buffer, "session_id": session_id})
-                    think_buffer = ""
+                think_buffer = ""
                 text = "".join(accumulated).strip()
                 # Strip <think>...</think> blocks from final content
                 if is_thinking_model:

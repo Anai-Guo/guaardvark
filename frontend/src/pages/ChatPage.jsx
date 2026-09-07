@@ -1351,14 +1351,20 @@ const ChatPage = () => {
       if (fileDetection?.isAgentLoopRequest) {
         shouldContinueWithNormalChat = false;
 
-        const userMsgId = `user_${Date.now()}`;
-        const userMessage = {
-          id: userMsgId,
-          role: "user",
-          content: inputText,
-          timestamp: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, userMessage]);
+        // The optimistic user bubble is already on screen; mark it sent rather
+        // than appending a second copy of the same text.
+        if (userMessageTempId) {
+          setMessages((prev) => prev.map((m) =>
+            m.tempId === userMessageTempId ? { ...m, status: "sent" } : m
+          ));
+        } else {
+          setMessages((prev) => [...prev, {
+            id: `user_${Date.now()}`,
+            role: "user",
+            content: inputText,
+            timestamp: new Date().toISOString(),
+          }]);
+        }
 
         const agentMsgId = `agent_${Date.now()}`;
         setAgentLoopMessageId(agentMsgId);
@@ -1384,7 +1390,10 @@ const ChatPage = () => {
             ? result.result
             : result?.result || result;
 
+          // display_content is what the server persisted for this turn; a
+          // tool_result or file_generation shape carries no final_answer.
           let content =
+            result?.display_content ||
             agentResult?.final_answer ||
             agentResult?.error ||
             result?.error;
@@ -1440,16 +1449,25 @@ const ChatPage = () => {
 
         const continuityMarker = preserveContextDuringFileGeneration(sessionId, inputText, fileDetection);
 
-        const contextPreservationMessage = {
-          id: `context_${Date.now()}`,
-          role: "user",
-          content: inputText,
-          timestamp: new Date().toISOString(),
+        // Tag the optimistic user bubble instead of adding a second one.
+        const continuityFields = {
           contextPreserved: true,
           fileGenerationAttempted: true,
-          continuityMarker: continuityMarker.id
+          continuityMarker: continuityMarker.id,
         };
-        setMessages((prev) => [...prev, contextPreservationMessage]);
+        if (userMessageTempId) {
+          setMessages((prev) => prev.map((m) =>
+            m.tempId === userMessageTempId ? { ...m, ...continuityFields } : m
+          ));
+        } else {
+          setMessages((prev) => [...prev, {
+            id: `context_${Date.now()}`,
+            role: "user",
+            content: inputText,
+            timestamp: new Date().toISOString(),
+            ...continuityFields,
+          }]);
+        }
 
         recordMessage(sessionId, inputText, 'user', {
           fileGenerationTriggered: true,

@@ -31,6 +31,17 @@ Everything the H3 release can do, wired through the product, on a branch until i
   thinking model could spend a 150- or 400-token cap on reasoning and return nothing to parse.
   Every one of them now spreads `think_payload(model)`, which is `{"think": false}` for a model
   that reasons and nothing for any other.
+- **Three chat defects seen on camera 2026-09-05.** A thinking model is prompted with
+  `[tool_call]` markup, but the stream only held back the angle-bracket form, so the raw
+  markup typed into the bubble for a second before the parser consumed it; both forms are
+  held back now, and neither reaches saved history. A reply that echoed the tool list
+  (`search_knowledge_base(query:string, top_k:int?)...`) was non-empty, so the empty-answer
+  retry never fired and the echo became the answer; the turn is now repeated once with
+  thinking off and says plainly if the model echoes again. On the legacy agent-loop and
+  file-generation paths the page appended a second user bubble after the optimistic one and
+  read a `final_answer` that `tool_result` and `file_generation` replies never carry, so a
+  finished CSV was reported as "Agent execution completed with no response"; the bubble is
+  reused and the server now returns the `display_content` it already persisted.
 - **One active video model for every pipeline.** Chat `/video`, `videos generate` in the CLI,
   batch requests that omit a model, the music video and Film Crew all pick their model through
   one resolver: an explicit id, else a per-pipeline override, else the global setting at

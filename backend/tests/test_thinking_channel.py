@@ -233,3 +233,53 @@ class TestSanitizedRetry:
         assert content == ANSWER_TEXT
         assert calls[0]["think"] is False
         assert calls[1]["think"] is False, "the sanitized retry rebuilt kwargs without think"
+
+
+class TestToolMarkupInBracketForm:
+    """Thinking models are prompted with [tool_call]; the stream must hold it back."""
+
+    def test_bracket_tool_call_is_not_streamed_to_the_bubble(self, engine):
+        engine._think = False
+
+        def chat(**kw):
+            # "[tool_" arrives on its own first, the way Ollama tokenises it;
+            # the buffered prefix must not be flushed at the end of the call.
+            for piece in ("Sure, one moment. ", "[tool_", "call]", " [tool]generate_csv[/tool]",
+                          " [params]{\"filename\": \"a.csv\"}[/params] [/tool_call]"):
+                yield {"message": {"content": piece}}
+            yield _done()
+
+        (content, _, _), events = _stream(engine, chat)
+
+        streamed = "".join(t["content"] for t in _tokens(events))
+        assert "[tool_" not in streamed
+        assert "generate_csv" not in streamed
+        assert streamed.strip() == "Sure, one moment."
+        assert "[tool_call]" in content  # the parser still sees the full reply
+
+
+class TestToolListEcho:
+    TOOLS = ["search_knowledge_base", "generate_csv"]
+
+    def test_signature_echo_is_recognised(self):
+        echo = "search_knowledge_base(query:string, top_k:int?, project_id:string?)] workspaces ..."
+        assert uce._looks_like_tool_list_echo(echo, self.TOOLS)
+        assert uce._looks_like_tool_list_echo("- generate_csv(filename:string) - Make a CSV", self.TOOLS)
+        assert uce._looks_like_tool_list_echo("[generate_csv(filename:string)]", self.TOOLS)
+
+    def test_prose_and_unknown_names_are_not_echoes(self):
+        assert not uce._looks_like_tool_list_echo("Here is the CSV you asked for.", self.TOOLS)
+        assert not uce._looks_like_tool_list_echo("f(x:int) is a function", self.TOOLS)
+        assert not uce._looks_like_tool_list_echo("search_knowledge_base is a tool I have", self.TOOLS)
+        assert not uce._looks_like_tool_list_echo("", self.TOOLS)
+
+
+class TestPendingToolMarker:
+    def test_marker_prefix_stays_buffered(self):
+        assert uce._split_pending_tool_marker("Sure, one moment. [tool_") == ("Sure, one moment. ", "[tool_")
+        assert uce._split_pending_tool_marker("text <tool") == ("text ", "<tool")
+
+    def test_ordinary_brackets_are_emitted(self):
+        assert uce._split_pending_tool_marker("see [1] and [note") == ("see [1] and [note", "")
+        assert uce._split_pending_tool_marker("a < b") == ("a < b", "")
+        assert uce._split_pending_tool_marker("plain") == ("plain", "")
