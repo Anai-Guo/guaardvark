@@ -131,6 +131,16 @@ function resolveAllowedHosts(rootEnv) {
   ];
 }
 
+// Package -> output chunk. Everything else under node_modules stays in the
+// default vendor split.
+const VENDOR_CHUNKS = Object.fromEntries([
+  ...['react', 'react-dom'].map((n) => [n, 'vendor']),
+  ...['@mui/material', '@mui/icons-material', '@emotion/react', '@emotion/styled'].map((n) => [n, 'mui']),
+  ['react-router-dom', 'routing'],
+  ...['axios', 'socket.io-client'].map((n) => [n, 'api']),
+  ...['zustand', 'react-grid-layout', 'react-markdown', 'react-syntax-highlighter'].map((n) => [n, 'utils']),
+]);
+
 export default defineConfig(({ mode }) => {
   const rootEnv = loadEnv(mode, REPO_ROOT, "");
   const { flaskPort, vitePort } = resolvePorts(mode);
@@ -196,13 +206,13 @@ export default defineConfig(({ mode }) => {
     rollupOptions: {
       plugins: [rollupNodePolyFill()],
       output: {
-        manualChunks: {
-          vendor: ['react', 'react-dom'],
-          mui: ['@mui/material', '@mui/icons-material', '@emotion/react', '@emotion/styled'],
-          routing: ['react-router-dom'],
-          api: ['axios', 'socket.io-client'],
-          utils: ['zustand', 'react-grid-layout', 'react-markdown', 'react-syntax-highlighter']
-        }
+        // Function form: Vite 8 bundles with Rolldown, which does not accept
+        // the object form ("manualChunks is not a function"). Same groups.
+        manualChunks: (id) => {
+          const m = id.match(/[\\/]node_modules[\\/]((?:@[^\\/]+[\\/])?[^\\/]+)/);
+          if (!m) return undefined;
+          return VENDOR_CHUNKS[m[1]];
+        },
       }
     },
     sourcemap: false,
