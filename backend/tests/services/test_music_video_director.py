@@ -39,7 +39,10 @@ def _plan(n):
 
 
 def _fake_chat(shots):
-    def chat(*, model, messages, format=None, options=None):
+    def chat(*, model, messages, format=None, options=None, think=None):
+        # The director asks a thinking model for an answer only; the stubbed
+        # model list is gemma4, so the flag must arrive and be off.
+        assert think is False
         return {"message": {"content": json.dumps({"shots": shots})}}
     return chat
 
