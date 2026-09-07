@@ -2,6 +2,7 @@
 import logging
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from flask import Blueprint, request
 from backend.utils.response_utils import success_response, error_response
@@ -11,14 +12,27 @@ logger = logging.getLogger(__name__)
 system_bp = Blueprint("system", __name__, url_prefix="/api/system")
 
 
+def _read_version() -> str:
+    """Version from the repo-root VERSION file, the same source app.py uses.
+
+    Resolved relative to this file rather than GUAARDVARK_ROOT, which may point
+    at a writable data directory instead of the checkout.
+    """
+    version_file = Path(__file__).resolve().parents[2] / "VERSION"
+    try:
+        return version_file.read_text(encoding="utf-8").strip() or "unknown"
+    except OSError:
+        return "unknown"
+
+
 @system_bp.route("/version", methods=["GET"])
 def get_version():
     try:
         return success_response("Version retrieved", {
-            "version": "1.0.0",
+            "version": _read_version(),
             "name": "guaardvark",
             "description": "LLM-powered development environment",
-            "timestamp": "2025-09-27T07:15:00Z"
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         })
     except Exception as e:
         logger.error(f"Error getting version: {e}")

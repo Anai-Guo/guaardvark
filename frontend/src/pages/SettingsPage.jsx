@@ -156,6 +156,9 @@ const SettingsPage = () => {
   const [advancedDebug, setAdvancedDebug] = useState(getInitialAdvancedDebug);
   const [llmDebug, setLlmDebugState] = useState(getInitialLlmDebug);
   const [verbatimPrompts, setVerbatimPromptsState] = useState(false);
+  // VERBATIM_PROMPTS in the server environment overrides the toggle; when set
+  // the chip shows on and cannot be changed here.
+  const [verbatimForcedByEnv, setVerbatimForcedByEnv] = useState(false);
   // Media stack (stills / cast LoRA train / max quality) — Ollama-picker style
   const [mediaModels, setMediaModelsState] = useState({
     stills_model: "zimage-turbo",
@@ -969,10 +972,12 @@ const SettingsPage = () => {
     const fetchVerbatim = async () => {
       try {
         const result = await apiService.getVerbatimPrompts();
-        const verbatimOn = result?.data?.enabled ?? result?.enabled;
+        const payload = result?.data ?? result;
+        const verbatimOn = payload?.enabled;
         if (typeof verbatimOn === "boolean") {
           setVerbatimPromptsState(verbatimOn);
         }
+        setVerbatimForcedByEnv(Boolean(payload?.forced_by_env));
       } catch (err) {
         console.warn("Failed to fetch verbatim prompts setting:", err);
       }
@@ -1536,7 +1541,11 @@ const SettingsPage = () => {
     }
   };
 
-  const handleWebSearchToggle = (nextValue) => {
+  // Web access is a server-side gate: allow_web_search is read by the web,
+  // browser and address-lookup tools. The localStorage copy only seeds the
+  // first paint, so a failed save has to roll both back or they disagree.
+  const handleWebSearchToggle = async (nextValue) => {
+    const previous = webSearchEnabled;
     const isEnabled = typeof nextValue === "boolean"
       ? nextValue
       : !webSearchEnabled;
@@ -1544,17 +1553,27 @@ const SettingsPage = () => {
     setWebSearchEnabled(isEnabled);
     try {
       localStorage.setItem(WEB_SEARCH_ENABLED_KEY, String(isEnabled));
-      apiService
-        .setWebAccess(isEnabled)
-        .catch((err) =>
-          console.warn("Failed to update web access setting:", err),
-        );
     } catch (e) {
       console.warn("Failed to persist web search setting:", e);
     }
+    try {
+      await apiService.setWebAccess(isEnabled);
+    } catch (err) {
+      console.warn("Failed to update web access setting:", err);
+      setWebSearchEnabled(previous);
+      try {
+        localStorage.setItem(WEB_SEARCH_ENABLED_KEY, String(previous));
+      } catch (e) {
+        console.warn("Failed to restore web search setting:", e);
+      }
+      showMessage("Could not save web access; the setting was not changed.", "error");
+      return;
+    }
     debugLog("Web Search toggled", { isEnabled });
     showMessage(
-      `Web Search ${isEnabled ? "enabled" : "disabled"} (UI only).`,
+      isEnabled
+        ? "Web access enabled: tools may fetch pages and search the web."
+        : "Web access disabled: web and browser tools are blocked.",
       "info",
     );
   };
@@ -1579,6 +1598,13 @@ const SettingsPage = () => {
     );
   };
   const handleVerbatimPromptsToggle = (event) => {
+    if (verbatimForcedByEnv) {
+      showMessage(
+        "Verbatim prompts are forced on by VERBATIM_PROMPTS in the server environment. Remove that variable and restart to control it here.",
+        "info",
+      );
+      return;
+    }
     const isEnabled = deriveToggleValue(event, verbatimPrompts);
     setVerbatimPromptsState(isEnabled);
     apiService
@@ -3048,11 +3074,17 @@ const SettingsPage = () => {
                     variant="outlined"
                     size="small"
                     onClick={async () => {
+                      if (!window.confirm(
+                        "Reset autoresearch to defaults?\n\n" +
+                        "This discards the tuned retrieval parameters, the baseline score and phase progress " +
+                        "learned by previous nightly runs, and clears the proposer, judge, window and auto-start settings.\n\n" +
+                        "Past experiment records are kept. This cannot be undone."
+                      )) return;
                       try {
                         await ragAutoresearchService.resetConfig();
                         const data = await ragAutoresearchService.getSettings();
                         setAutoresearchSettings(data);
-                        showMessage("Autoresearch config reset to defaults", "success");
+                        showMessage("Autoresearch reset: tuned parameters, baseline and settings are back to defaults", "success");
                       } catch (e) {
                         showMessage("Failed to reset autoresearch config", "error");
                       }
@@ -3456,7 +3488,15 @@ const SettingsPage = () => {
               </SettingsRow>
               <SettingsRow label="Generation" stacked>
                 <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.75 }}>
-                  <Chip label="Verbatim Prompts (no AI rewrite)" onClick={handleVerbatimPromptsToggle} size="small" color={verbatimPrompts ? "primary" : "default"} variant={verbatimPrompts ? "filled" : "outlined"} />
+                  <Tooltip title={verbatimForcedByEnv ? "Forced on by VERBATIM_PROMPTS in the server environment" : ""}>
+                    <Chip
+                      label={verbatimForcedByEnv ? "Verbatim Prompts (forced by environment)" : "Verbatim Prompts (no AI rewrite)"}
+                      onClick={handleVerbatimPromptsToggle}
+                      size="small"
+                      color={verbatimPrompts ? "primary" : "default"}
+                      variant={verbatimPrompts ? "filled" : "outlined"}
+                    />
+                  </Tooltip>
                 </Box>
               </SettingsRow>
               <SettingsRow label="Media models" stacked>

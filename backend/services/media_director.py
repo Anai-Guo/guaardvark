@@ -108,6 +108,17 @@ def _style_clause(style: Optional[str]) -> str:
     return f"\nGlobal visual style/aesthetic to honor: {style}." if style else ""
 
 
+def verbatim_prompts_env_forced() -> bool:
+    """True when VERBATIM_PROMPTS in the environment forces verbatim mode on.
+
+    The Settings toggle cannot turn this off; the settings API reports it so
+    the page can show the switch as forced instead of showing a stored value
+    the generators ignore.
+    """
+    import os
+    return os.environ.get("VERBATIM_PROMPTS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def verbatim_prompts_enabled() -> bool:
     """True when the operator turned ON 'verbatim prompts' — send the user's EXACT words
     to the image/video model and SKIP director-LLM rewrite, offline style stuffing, and
@@ -131,8 +142,7 @@ def verbatim_prompts_enabled() -> bool:
       * ImageGeneratorTool / batch image (auto_enhance)
       * comfyui_video_generator prompt enhance
     """
-    import os
-    if os.environ.get("VERBATIM_PROMPTS", "").strip().lower() in ("1", "true", "yes", "on"):
+    if verbatim_prompts_env_forced():
         return True
     try:
         from flask import has_app_context

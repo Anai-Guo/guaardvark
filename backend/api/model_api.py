@@ -637,13 +637,57 @@ def list_embedding_models():
     }, "Embedding models retrieved")
 
 
+def _embed_dim_of(embed_model) -> "int | None":
+    """Vector width of an embed model already bound in app config, or None.
+
+    RouterEmbeddingAdapter exposes ``embed_dim`` (backed by ``_cached_embed_dim``);
+    a bare OllamaEmbedding has no stored width, so it is probed with one short
+    string. The caller compares this with the incoming model's width to decide
+    whether the index survives the switch.
+    """
+    if embed_model is None:
+        return None
+    # Stored widths first. The adapter's ``embed_dim`` property is consulted
+    # last because it answers 4096 when nothing is cached, which would mask a
+    # real change.
+    for attr in ("_cached_embed_dim", "_embed_dim"):
+        try:
+            value = getattr(embed_model, attr, None)
+        except Exception:
+            value = None
+        if isinstance(value, int) and value > 0:
+            return value
+    router = getattr(embed_model, "_router", None)
+    if router is not None:
+        try:
+            value = router.embed_dim
+            if isinstance(value, int) and value > 0:
+                return value
+        except Exception:
+            pass
+    try:
+        return len(embed_model.get_text_embedding("dimension probe"))
+    except Exception:
+        pass
+    try:
+        value = getattr(embed_model, "embed_dim", None)
+        if isinstance(value, int) and value > 0:
+            return value
+    except Exception:
+        pass
+    return None
+
+
 @model_bp.route("/embedding/set", methods=["POST"])
 def set_embedding_model():
     """Switch the active embedding model at runtime.
 
-    This reinitializes the EmbeddingRouter singleton and updates the
-    LlamaIndex embed model stored in app config. Existing indexes
-    keep their vectors — only new embeddings use the new model.
+    Reinitializes the EmbeddingRouter singleton and the LlamaIndex embed model
+    in app config. If the new model's vector width differs from the previous
+    one the existing index is unusable: the JSON store is deleted (simple
+    backend) and the in-memory index is reset so pgvector binds a fresh table
+    for the new width. Either way the caller must re-index. Same width keeps
+    the index.
     """
     data = request.get_json() or {}
     model_name = data.get("model")
@@ -674,6 +718,10 @@ def set_embedding_model():
         embed_dim = len(test_vec)
         logger.info(f"Embedding model '{model_name}' produces {embed_dim}-dim vectors")
 
+        # Read the outgoing model's width BEFORE anything below replaces it in
+        # app config; reading it afterwards compares the new model with itself.
+        prev_dim = _embed_dim_of(current_app.config.get("LLAMA_INDEX_EMBED_MODEL"))
+
         # Reset the EmbeddingRouter singleton so it picks up the new model
         try:
             from backend.utils.embedding_router import EmbeddingRouter, RouterEmbeddingAdapter
@@ -695,21 +743,9 @@ def set_embedding_model():
         except Exception:
             pass
 
-        # Only clear vector store if embedding dimension actually changed
-        # Models with the same dimension are interchangeable without reindexing
-        prev_dim = None
-        try:
-            prev_embed = current_app.config.get("LLAMA_INDEX_EMBED_MODEL")
-            if prev_embed:
-                prev_dim = getattr(prev_embed, '_embed_dim', None)
-                if prev_dim is None:
-                    # Try to get from router
-                    router_obj = getattr(prev_embed, '_router', None)
-                    if router_obj:
-                        prev_dim = getattr(router_obj, '_embed_dim', None)
-        except Exception:
-            pass
-
+        # Models with the same width are interchangeable without reindexing.
+        # An unknown previous width is treated as changed: keeping an index of
+        # unknown width would be the mixed-dimension store this guards against.
         dimension_changed = prev_dim is None or prev_dim != embed_dim
         if dimension_changed:
             try:
@@ -724,15 +760,18 @@ def set_embedding_model():
                         cleared_files.append(fname)
                 if cleared_files:
                     logger.info(f"Cleared vector store files — dimension changed: {prev_dim} → {embed_dim}: {cleared_files}")
-                    # Reset in-memory index so it rebuilds fresh on next use
-                    try:
-                        import backend.services.indexing_service as idx_svc
-                        idx_svc.index = None
-                        idx_svc.storage_context = None
-                    except Exception:
-                        pass
             except Exception as vs_err:
                 logger.warning(f"Failed to clear vector store: {vs_err}")
+            # Drop the in-memory index whatever the backend. pgvector names its
+            # table by width, so a live index would keep writing to the old
+            # table with the old width until the next process start.
+            try:
+                import backend.services.indexing_service as idx_svc
+                idx_svc.index = None
+                idx_svc.storage_context = None
+            except Exception:
+                pass
+            logger.info(f"Embedding dimension changed {prev_dim} → {embed_dim}: index reset, re-index required")
         else:
             logger.info(f"Embedding dimension unchanged ({embed_dim}d) — keeping existing index")
 
@@ -751,6 +790,7 @@ def set_embedding_model():
         return success_response(f"Embedding model switched to {model_name}", {
             "model": model_name,
             "dimensions": embed_dim,
+            "previous_dimensions": prev_dim,
             "index_cleared": dimension_changed,
         })
 

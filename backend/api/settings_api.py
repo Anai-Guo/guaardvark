@@ -135,13 +135,20 @@ def set_address_provider():
 
 @settings_bp.route("/verbatim_prompts", methods=["GET"])
 def get_verbatim_prompts():
-    """Whether image/video prompts go to the model verbatim (director-LLM rewrite OFF)."""
+    """Whether image/video prompts go to the model verbatim (director-LLM rewrite OFF).
+
+    ``enabled`` is the effective value the generators use. ``stored`` is the
+    toggle's own value; ``forced_by_env`` says VERBATIM_PROMPTS overrides it.
+    """
+    from backend.services.media_director import verbatim_prompts_env_forced
+
     try:
         row = db.session.get(SystemSetting, "verbatim_prompts")
-        enabled = bool(row and str(row.value).lower() == "true")
+        stored = bool(row and str(row.value).lower() == "true")
     except Exception:
-        enabled = False
-    return success_response({"enabled": enabled})
+        stored = False
+    forced = verbatim_prompts_env_forced()
+    return success_response({"enabled": stored or forced, "stored": stored, "forced_by_env": forced})
 
 
 @settings_bp.route("/chat_image_model", methods=["GET"])
@@ -297,7 +304,10 @@ def set_verbatim_prompts():
         db.session.rollback()
         current_app.logger.error(f"Failed to update verbatim_prompts setting: {e}")
         return error_response("Failed to update setting", status_code=500)
-    return success_response({"enabled": enabled})
+    from backend.services.media_director import verbatim_prompts_env_forced
+
+    forced = verbatim_prompts_env_forced()
+    return success_response({"enabled": enabled or forced, "stored": enabled, "forced_by_env": forced})
 
 
 @settings_bp.route("/advanced_debug", methods=["GET"])
