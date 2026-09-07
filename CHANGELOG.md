@@ -42,6 +42,13 @@ Everything the H3 release can do, wired through the product, on a branch until i
   read a `final_answer` that `tool_result` and `file_generation` replies never carry, so a
   finished CSV was reported as "Agent execution completed with no response"; the bubble is
   reused and the server now returns the `display_content` it already persisted.
+- **Chat retrieval had been failing on every turn.** The hybrid retriever ran its vector and
+  keyword legs through a nested event loop; inside a request thread the first call died with
+  "Detected nested async" and every later one with asyncpg's "another operation is in
+  progress", so the model answered from memory and told people nothing was indexed while 18
+  documents were. The two legs now run in sequence on the store's synchronous engine
+  (`use_async=False` in `backend/services/indexing_service.py`); a question about the indexed
+  README comes back citing it.
 - **One active video model for every pipeline.** Chat `/video`, `videos generate` in the CLI,
   batch requests that omit a model, the music video and Film Crew all pick their model through
   one resolver: an explicit id, else a per-pipeline override, else the global setting at

@@ -1874,12 +1874,19 @@ def search_with_llamaindex(
                     try:
                         # relative_score is the only fusion mode that honors retriever_weights.
                         # Order matches retrievers=[vector, bm25] → [eff_alpha, 1-eff_alpha].
+                        # use_async=False: the default runs both legs through a
+                        # nested event loop, which inside a request thread failed
+                        # every chat retrieval ("Detected nested async") and then
+                        # left the vector store's asyncpg connection mid-operation
+                        # for every later call. The sync path uses the store's
+                        # psycopg2 engine; two legs in sequence cost milliseconds.
                         retriever = QueryFusionRetriever(
                             retrievers=[base_retriever, bm25_retriever],
                             similarity_top_k=candidate_top_k,
                             num_queries=1,
                             mode="relative_score",
                             retriever_weights=[eff_alpha, 1.0 - eff_alpha],
+                            use_async=False,
                         )
                         trace["legs"] = ["vector", "bm25"]
                         trace["fusion"] = "relative_score"
@@ -1892,6 +1899,7 @@ def search_with_llamaindex(
                             similarity_top_k=candidate_top_k,
                             num_queries=1,
                             mode="reciprocal_rerank",
+                            use_async=False,
                         )
                         trace["legs"] = ["vector", "bm25"]
                         trace["fusion"] = "reciprocal_rerank"
