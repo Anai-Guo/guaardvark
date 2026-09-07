@@ -8,9 +8,11 @@ export const getAvailableModels = async () => {
     const data = await handleResponse(response);
     if (typeof data === "object" && data !== null && data.error)
       throw new Error(data.error);
-    // Handle new standardized response format
-    if (data?.success && data?.message?.models) {
-      return Array.isArray(data.message.models) ? data.message.models : [];
+    // Standard envelope: the payload is under data. Older backends put it
+    // under message (the arguments were reversed), so accept both.
+    const payload = data?.data?.models ? data.data : data?.message?.models ? data.message : null;
+    if (data?.success && payload) {
+      return Array.isArray(payload.models) ? payload.models : [];
     }
     // Handle old format for backward compatibility
     return Array.isArray(data?.models) ? data.models : [];
@@ -29,7 +31,7 @@ export const getCurrentModel = async () => {
     const data = await handleResponse(response);
     if (typeof data === "object" && data !== null && data.error)
       throw new Error(data.error);
-    // Handle new standardized response format
+    // Standard envelope with an older-backend fallback (see getAvailableModels).
     if (data?.success && data?.message?.model) {
       return data.message.model;
     }

@@ -135,13 +135,20 @@ def set_address_provider():
 
 @settings_bp.route("/verbatim_prompts", methods=["GET"])
 def get_verbatim_prompts():
-    """Whether image/video prompts go to the model verbatim (director-LLM rewrite OFF)."""
+    """Whether image/video prompts go to the model verbatim (director-LLM rewrite OFF).
+
+    ``enabled`` is the effective value the generators use. ``stored`` is the
+    toggle's own value; ``forced_by_env`` says VERBATIM_PROMPTS overrides it.
+    """
+    from backend.services.media_director import verbatim_prompts_env_forced
+
     try:
         row = db.session.get(SystemSetting, "verbatim_prompts")
-        enabled = bool(row and str(row.value).lower() == "true")
+        stored = bool(row and str(row.value).lower() == "true")
     except Exception:
-        enabled = False
-    return success_response({"enabled": enabled})
+        stored = False
+    forced = verbatim_prompts_env_forced()
+    return success_response({"enabled": stored or forced, "stored": stored, "forced_by_env": forced})
 
 
 @settings_bp.route("/chat_image_model", methods=["GET"])
@@ -166,6 +173,65 @@ def set_chat_image_model_route():
         current_app.logger.error(f"Failed to update chat_image_model setting: {e}")
         return error_response("Failed to update setting", status_code=500)
     return success_response({"model": model})
+
+
+@settings_bp.route("/active_video_model", methods=["GET"])
+def get_active_video_model_route():
+    """Persisted video-model default plus the resolved t2v/i2v/scene ids."""
+    from backend.utils.settings_utils import get_active_video_model, get_active_video_model_overrides
+    from backend.services.video_model_registry import resolve_active_video_model
+
+    overrides = get_active_video_model_overrides()
+    resolved = {}
+    for role in ("t2v", "i2v", "scene"):
+        mid, err = resolve_active_video_model(role)
+        resolved[role] = {"model": mid, "error": err}
+    return success_response({
+        "model": get_active_video_model(),
+        "i2v": overrides["i2v"],
+        "music_video": overrides["music_video"],
+        "film_crew": overrides["film_crew"],
+        "resolved": resolved,
+    })
+
+
+@settings_bp.route("/active_video_model", methods=["POST"])
+def set_active_video_model_route():
+    """Set the global video model and optional per-pipeline overrides.
+
+    Empty string clears a field (inherit / hardware fallback). An id that is
+    unknown or not installed is refused.
+    """
+    if not request.is_json:
+        return error_response("Request must be JSON")
+    data = request.get_json() or {}
+    from backend.utils.settings_utils import save_setting
+    from backend.services.video_model_registry import preflight_video_model, VIDEO_MODEL_REGISTRY
+
+    mapping = {
+        "model": "active_video_model",
+        "i2v": "active_video_model_i2v",
+        "music_video": "active_video_model_music_video",
+        "film_crew": "active_video_model_film_crew",
+    }
+    saved = {}
+    for field, key in mapping.items():
+        if field not in data:
+            continue
+        value = (data.get(field) or "").strip()
+        if value:
+            if value not in VIDEO_MODEL_REGISTRY:
+                return error_response(f"Unknown video model '{value}'", 400)
+            ready, err = preflight_video_model(value)
+            if not ready:
+                return error_response(err or f"{value} is not installed", 400)
+        try:
+            save_setting(key, value)
+        except Exception as e:
+            current_app.logger.error(f"Failed to update {key}: {e}")
+            return error_response("Failed to update setting", status_code=500)
+        saved[field] = value
+    return success_response(saved)
 
 
 @settings_bp.route("/media_models", methods=["GET"])
@@ -238,7 +304,10 @@ def set_verbatim_prompts():
         db.session.rollback()
         current_app.logger.error(f"Failed to update verbatim_prompts setting: {e}")
         return error_response("Failed to update setting", status_code=500)
-    return success_response({"enabled": enabled})
+    from backend.services.media_director import verbatim_prompts_env_forced
+
+    forced = verbatim_prompts_env_forced()
+    return success_response({"enabled": enabled or forced, "stored": enabled, "forced_by_env": forced})
 
 
 @settings_bp.route("/advanced_debug", methods=["GET"])
@@ -503,6 +572,46 @@ def set_profile():
     return success_response({"name": name, "restart_required": name != P.active_profile().name})
 
 
+OLLAMA_KEEP_ENV = "GUAARDVARK_OLLAMA_KEEP_RUNNING"
+OLLAMA_EXTERNAL_ENV = "GUAARDVARK_OLLAMA_EXTERNAL"
+
+
+def _env_flag(value) -> bool:
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+@settings_bp.route("/ollama_lifecycle", methods=["GET"])
+def get_ollama_lifecycle():
+    """How stop.sh and start.sh treat Ollama, as recorded in .env."""
+    from backend import profiles as P
+    return success_response({
+        "keep_running": _env_flag(P.read_env_value(OLLAMA_KEEP_ENV)),
+        "external": _env_flag(P.read_env_value(OLLAMA_EXTERNAL_ENV)),
+        "env_writable": P.env_file_writable(),
+    })
+
+
+@settings_bp.route("/ollama_lifecycle", methods=["POST"])
+def set_ollama_lifecycle():
+    """Persist the Ollama policy to .env. stop.sh reads it on every stop, start.sh on
+    every start, so no restart is needed."""
+    from backend import profiles as P
+    payload = request.get_json(silent=True) or {}
+    try:
+        if "keep_running" in payload:
+            P.set_env_value(OLLAMA_KEEP_ENV, "1" if _env_flag(payload["keep_running"]) else None)
+        if "external" in payload:
+            P.set_env_value(OLLAMA_EXTERNAL_ENV, "1" if _env_flag(payload["external"]) else None)
+    except ValueError as e:
+        return error_response(str(e), 400)
+    except OSError as e:
+        return error_response(f"could not write .env: {e}", 500)
+    return success_response({
+        "keep_running": _env_flag(P.read_env_value(OLLAMA_KEEP_ENV)),
+        "external": _env_flag(P.read_env_value(OLLAMA_EXTERNAL_ENV)),
+    })
+
+
 @settings_bp.route("/branding", methods=["POST"])
 def set_branding():
     """Update system name and/or logo."""
@@ -556,53 +665,15 @@ def set_branding():
     return success_response({"system_name": name, "logo_path": logo_rel})
 
 
-@settings_bp.route("/rag_debug", methods=["GET"])
-def get_rag_debug():
-    enabled = False
-    try:
-        setting = db.session.get(Setting, "rag_debug_enabled")
-        if setting and setting.value == "true":
-            enabled = True
-    except Exception as e:
-        current_app.logger.error(f"Failed to read RAG debug setting: {e}")
-    return success_response({"rag_debug_enabled": enabled})
-
-
-@settings_bp.route("/rag_debug", methods=["POST"])
-def set_rag_debug():
-    if not request.is_json:
-        return error_response("Request must be JSON")
-    data = request.get_json()
-    enabled = bool(data.get("rag_debug_enabled"))
-    try:
-        setting = db.session.get(Setting, "rag_debug_enabled")
-        if setting:
-            setting.value = "true" if enabled else "false"
-        else:
-            setting = Setting(
-                key="rag_debug_enabled", value="true" if enabled else "false"
-            )
-            db.session.add(setting)
-        db.session.commit()
-    except Exception as e:
-        db.session.rollback()
-        current_app.logger.error(
-            f"Failed to update RAG debug setting: {e}", exc_info=True
-        )
-        return error_response("Failed to update setting", status_code=500)
-    return success_response({"rag_debug_enabled": enabled})
-
-
 @settings_bp.route("/rag-features", methods=["GET"])
 def get_rag_features():
     """Get all RAG-related feature settings"""
     try:
-        from backend.config import ENHANCED_CONTEXT_ENABLED, ADVANCED_RAG_ENABLED, RAG_DEBUG_ENABLED
+        from backend.config import ENHANCED_CONTEXT_ENABLED, ADVANCED_RAG_ENABLED
         
         # Get database settings (runtime overrides)
         enhanced_context = ENHANCED_CONTEXT_ENABLED
-        advanced_rag = ADVANCED_RAG_ENABLED  
-        rag_debug = RAG_DEBUG_ENABLED
+        advanced_rag = ADVANCED_RAG_ENABLED
         
         # Check for database overrides
         try:
@@ -614,17 +685,12 @@ def get_rag_features():
             if rag_setting:
                 advanced_rag = rag_setting.value == "true"
                 
-            debug_setting = db.session.get(Setting, "rag_debug_enabled")
-            if debug_setting:
-                rag_debug = debug_setting.value == "true"
-                
         except Exception as db_error:
             current_app.logger.warning(f"Failed to read RAG settings from database: {db_error}")
         
         return success_response({
             "enhanced_context": enhanced_context,
             "advanced_rag": advanced_rag,
-            "rag_debug": rag_debug
         })
         
     except Exception as e:
@@ -644,8 +710,7 @@ def update_rag_features():
         # Update settings that are provided
         settings_to_update = {
             "enhanced_context_enabled": data.get("enhanced_context"),
-            "advanced_rag_enabled": data.get("advanced_rag"), 
-            "rag_debug_enabled": data.get("rag_debug")
+            "advanced_rag_enabled": data.get("advanced_rag"),
         }
         
         updated_settings = {}
@@ -668,8 +733,6 @@ def update_rag_features():
                     updated_settings["enhanced_context"] = bool_value
                 elif key == "advanced_rag_enabled":
                     updated_settings["advanced_rag"] = bool_value
-                elif key == "rag_debug_enabled":
-                    updated_settings["rag_debug"] = bool_value
         
         db.session.commit()
         

@@ -288,6 +288,22 @@ def create_celery_app():
 
     celery_app.Task = ContextTask
 
+    # A task that raises must not leave its progress entry parked at 0 %: mark it
+    # errored with the exception text so the UI shows a failure, not a stall.
+    try:
+        from celery.signals import task_failure
+
+        @task_failure.connect
+        def _surface_task_failure(sender=None, task_id=None, exception=None, kwargs=None, **_ignored):
+            try:
+                from backend.utils.progress_failure import mark_progress_failed
+
+                mark_progress_failed(task_id, exception, kwargs)
+            except Exception:  # noqa: BLE001 - never fail a failing task twice
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+
     # Flush the runtime-liveness buffer when a worker child recycles
     # (max_tasks_per_child=50) or the worker shuts down, so a recycling child
     # doesn't drop its buffered hits. Solo/concurrency=1 means count-based
@@ -397,6 +413,17 @@ def create_celery_app():
     except ImportError as e:
         logger.warning(f"Could not import social outreach tasks: {e}")
 
+    # Beat entries a Settings toggle governs are held back by the scheduler
+    # while the toggle is off (backend/celery_beat_gates.py); declared here,
+    # next to the entries, so a new loop cannot be added without deciding.
+    from backend.celery_beat_gates import gate_beat_entries
+    gate_beat_entries(celery_app, {
+        'social-outreach-reddit-tick': 'social_outreach',
+        'social-outreach-self-share-tick': 'social_outreach',
+        'social-outreach-process-approved': 'social_outreach',
+        'social-outreach-reap-stuck-processing': 'social_outreach',
+    })
+
     try:
         from backend.tasks.memory_maintenance_tasks import cleanup_old_session_memory  # noqa: F401
         logger.info("Memory maintenance tasks imported successfully")
@@ -465,6 +492,8 @@ def create_celery_app():
             'schedule': float(os.environ.get("INTERCONNECTOR_HEARTBEAT_INTERVAL_S", 60)),
             'options': {'queue': 'health'},
         }
+        # Beat holds it back unless this node is an enabled client with a master.
+        gate_beat_entries(celery_app, {'interconnector-client-heartbeat': 'interconnector_client'})
         logger.info("Interconnector client-heartbeat task registered and scheduled")
     except ImportError as e:
         logger.warning(f"Could not import interconnector client heartbeat: {e}")

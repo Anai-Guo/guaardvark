@@ -36,6 +36,14 @@ class _SendRecorder:
         self.calls.append((name, tuple(args or ())))
 
 
+@pytest.fixture(autouse=True)
+def _resolve_i2v(monkeypatch):
+    monkeypatch.setattr(
+        "backend.services.video_model_registry.resolve_active_video_model",
+        lambda role, explicit=None, surface=None: (explicit or "wan22-5b", None),
+    )
+
+
 @pytest.fixture
 def sent(monkeypatch):
     """Capture celery.send_task across the dispatch sites."""
@@ -91,6 +99,10 @@ def test_analyzer_seeds_cut_plan_and_gates(app, sent, monkeypatch, tmp_path):
             "shots": [],
         }
     monkeypatch.setattr(director, "_generate_storyline_and_prompts", _fake_director)
+    # director_service binds the generator at import time, so patch its copy too or
+    # the mock silently misses whenever another test imported the engine first.
+    import backend.services.director_service as director_service
+    monkeypatch.setattr(director_service, "_generate_storyline_and_prompts", _fake_director)
 
     mvt.run_analyzer(mv.id)
     db.session.refresh(mv)
@@ -179,6 +191,34 @@ def test_clip_generator_regenerates_when_file_missing(app, sent, monkeypatch):
     assert called.get("idx") == 0   # treated as not-done, regenerated
 
 
+def test_clip_interrupt_marks_clip_failed_and_continues(app, sent, monkeypatch):
+    svc = MusicVideoService(db.session)
+    mv = _mk(svc)
+    mv.current_stage = "generating"
+    mv.status = "generating"
+    mv.clips = [
+        {"index": 0, "start": 0.0, "end": 2.0, "clip_path": None, "status": "pending"},
+        {"index": 1, "start": 2.0, "end": 4.0, "clip_path": None, "status": "pending"},
+    ]
+    db.session.commit()
+
+    monkeypatch.setattr(
+        "backend.services.plugin_bridge.ensure_plugins_for_stage", lambda *a, **k: None,
+    )
+
+    def boom(m, c):
+        raise RuntimeError("ComfyUI execution_interrupted: prompt cancelled")
+    monkeypatch.setattr(mvt, "_generate_one_clip", boom)
+
+    mvt.run_clip_generator(mv.id)
+    db.session.refresh(mv)
+    assert mv.status != "failed_generating"
+    assert mv.clips[0]["status"] == "failed"
+    assert "execution_interrupted" in (mv.clips[0].get("error") or "")
+    assert mv.clips[1]["status"] == "pending"
+    assert ("music_video.run_clip_generator", (mv.id,)) in sent.calls
+
+
 def test_clip_generator_failure_fails_stage(app, sent, monkeypatch):
     svc = MusicVideoService(db.session)
     mv = _mk(svc)
@@ -244,7 +284,7 @@ def test_settings_exposes_tuning_defaults(app):
     assert s["max_stretch"] == 2.0
     assert s["i2v_steps"] is None
     assert s["interpolation_multiplier"] == 2          # preserves prior implicit default
-    assert mvt._max_clip_s(s) == pytest.approx(49 / 16)  # WAN native forward length (16fps)
+    assert mvt._max_clip_s(s) == pytest.approx(121 / 24)  # Wan 5B native forward length
 
 
 def test_generate_one_clip_threads_steps_interp_and_fill_method(app, monkeypatch, tmp_path):
@@ -306,7 +346,7 @@ def test_generate_one_clip_threads_steps_interp_and_fill_method(app, monkeypatch
     mvt._generate_one_clip(mv, clip)
 
     req = captured["req"]
-    assert req.model == "wan22-14b-i2v"
+    assert req.model == "wan22-5b"
     assert req.num_inference_steps == 30        # steps override reached the request
     assert req.interpolation_multiplier == 4    # RIFE knob reached the request
     assert req.prompt == "a distinct shot"       # per-cut Director prompt → WAN
@@ -319,13 +359,13 @@ def test_clip_profile_reads_the_registry_for_declared_models(app):
     svc = MusicVideoService(db.session)
     wan = mvt._clip_profile(mvt._settings(_mk(svc)))
     assert (wan["model"], wan["fps"], wan["min_frames"], wan["max_frames"], wan["audio_out"]) == \
-        ("wan22-14b-i2v", 16, 17, 49, False)
+        ("wan22-5b", 24, 5, 121, False)
     s = mvt._settings(_mk(svc, settings={"i2v_model": "minimax-h3-int8"}))
     h3 = mvt._clip_profile(s)
-    assert (h3["fps"], h3["min_frames"], h3["max_frames"], h3["audio_out"]) == (24, 72, 175, True)
-    assert mvt._max_clip_s(s) == pytest.approx(175 / 24)
+    assert (h3["fps"], h3["min_frames"], h3["max_frames"], h3["audio_out"]) == (24, 72, 362, True)
+    assert mvt._max_clip_s(s) == pytest.approx(362 / 24)
     cog = mvt._clip_profile(mvt._settings(_mk(svc, settings={"i2v_engine": "cogvideox"})))
-    assert (cog["model"], cog["fps"], cog["max_frames"]) == ("cogvideox-5b-i2v", 7, 25)
+    assert (cog["model"], cog["fps"], cog["max_frames"]) == ("cogvideox-5b-i2v", 8, 49)
 
 
 def test_generate_one_clip_on_a_native_audio_model_anchors_the_song_slice(app, monkeypatch, tmp_path):

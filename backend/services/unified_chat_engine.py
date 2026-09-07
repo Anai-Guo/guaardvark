@@ -19,6 +19,7 @@ from typing import Dict, List, Any, Optional, Callable
 
 logger = logging.getLogger(__name__)
 
+from backend.utils.text_cut import cut_on_whitespace
 from backend.utils.llm_debug_logger import (
     log_system_prompt, log_user_message, log_llm_response,
     log_tool_call, log_tool_result, log_guard_event, log_decision,
@@ -28,6 +29,74 @@ logger = logging.getLogger(__name__)
 
 # Cache path for tool embeddings
 from backend.config import CACHE_DIR
+
+# chat:reasoning batching: ~150 chars is a sentence or two of reasoning, and
+# 250 ms keeps the panel visibly alive between sentences without one socket
+# frame per token.
+_REASONING_FLUSH_CHARS = 150
+_REASONING_FLUSH_SECS = 0.25
+
+# Appended as a system message when a thinking model spends its whole turn on
+# reasoning and returns no answer; the call is repeated once with thinking off.
+_ANSWER_AFTER_REASONING_NUDGE = (
+    "Your reasoning for this turn is complete. Do not reason further: write the "
+    "final answer for the user now, as plain visible text."
+)
+# Shown instead of the reasoning when the repeat also yields nothing.
+_REASONING_ONLY_FALLBACK_TEXT = (
+    "The model produced reasoning but no final answer. Please try again, or turn "
+    "thinking off with /thinking."
+)
+# Appended when the reply is the TOOLS block echoed back ("name(param:type, ...)")
+# instead of a tool call or an answer; the turn is repeated once with thinking off.
+_ANSWER_NOT_TOOL_LIST_NUDGE = (
+    "Your last reply repeated the tool list instead of answering. Either call one "
+    "tool in the tool_call format, or write the answer for the user as plain text. "
+    "Do not list tools."
+)
+# Shown when the repeat is another echo.
+_TOOL_LIST_ECHO_FALLBACK_TEXT = (
+    "The model echoed its tool list instead of answering. Please try again, or turn "
+    "thinking off with /thinking."
+)
+
+# A reply that opens with a tool signature the way the TOOLS prompt block prints
+# one: optional bracket or dash, a tool name, then "(param:type" ...
+_TOOL_SIGNATURE_RE = re.compile(r"^[\[\-\s]*([A-Za-z_]\w*)\(\s*[A-Za-z_]\w*\s*:\s*\w+\??")
+
+
+_TOOL_MARKERS = ("[tool_call]", "[tool]", "<tool_call>", "<tool>")
+
+
+def _split_pending_tool_marker(buf: str):
+    """Split ``buf`` into text safe to emit and a tail that may open tool markup.
+
+    Ollama streams "[tool_call]" as several tokens; once the buffer is
+    flushed, the "[tool_" already on screen cannot be taken back. The tail
+    from the last "[" or "<" stays buffered when it is a prefix of a marker.
+    """
+    cut = max(buf.rfind("["), buf.rfind("<"))
+    if cut < 0:
+        return buf, ""
+    tail = buf[cut:]
+    if any(m.startswith(tail) for m in _TOOL_MARKERS):
+        return buf[:cut], tail
+    return buf, ""
+
+
+def _looks_like_tool_list_echo(text: str, tool_names) -> bool:
+    """Whether ``text`` is the prompt's tool list echoed back, not an answer.
+
+    A small model sometimes replies with ``search_knowledge_base(query:string,
+    top_k:int?) ...``, the exact shape :func:`build_concise_tool_list` printed
+    for it. The tool-call parser finds nothing, so without this check the echo
+    is promoted to the final answer and saved to history.
+    """
+    if not text:
+        return False
+    m = _TOOL_SIGNATURE_RE.match(text.strip())
+    return bool(m) and m.group(1) in set(tool_names or ())
+
 TOOL_EMBEDDING_CACHE = os.path.join(CACHE_DIR, "tool_embeddings.json")
 
 # Abort flags for in-progress sessions
@@ -342,6 +411,8 @@ TOOL_CONTEXT_KEYWORDS = {
     "media": (["play", "pause", "stop", "music", "song", "volume", "mute", "unmute",
                "next track", "skip", "playing", "louder", "quieter"], MEDIA_TOOLS),
     "image": (IMAGE_GEN_INTENT_KEYWORDS, IMAGE_TOOLS),
+    "music_video": (["music video", "music-video"], ["generate_music_video"]),
+    "film_crew": (["film crew", "film-crew", "film this script"], ["start_film_crew"]),
     "agent_control": (["virtual screen", "virtual display", "virtual computer", "virtual browser",
                        "virtual machine", "agent screen", "agent mode", "agent vision",
                        "on the virtual", "from the virtual", "using the virtual",
@@ -409,6 +480,9 @@ def user_wants_image_generation(message: str) -> bool:
     """Strict gate: create new media vs describe/reference existing images or prompts."""
     if not message or not message.strip():
         return False
+    from backend.tools.video_pipeline_tools import is_music_video_request, is_film_crew_request
+    if is_music_video_request(message) or is_film_crew_request(message):
+        return False
     msg_lower = message.lower()
     if _SLASH_MEDIA_RE.match(msg_lower):
         return True
@@ -428,18 +502,27 @@ _VIDEO_INTENT_RE = re.compile(
     r"\b(generate|create|make|render|produce)\b[^.?!]{0,40}\bvideo\b", re.IGNORECASE
 )
 
-# Strip "generate a video of…" chrome so the video model gets pure scene text.
+# Strip "generate a video of…" / "/video " chrome so the video model gets pure scene text.
 _VIDEO_CHROME_RE = re.compile(
-    r"^\s*(please\s+)?(can\s+you\s+|could\s+you\s+)?"
-    r"(generate|create|make|render|produce)\s+(me\s+)?(a|an|the)?\s*"
-    r"(short\s+|quick\s+)?video\s*(clip\s*)?(of|about|showing|where|with|:)?\s*",
+    r"^\s*(?:/video\b[:\s]*|(?:please\s+)?(?:can\s+you\s+|could\s+you\s+)?"
+    r"(?:generate|create|make|render|produce)\s+(?:me\s+)?(?:a|an|the)?\s*"
+    r"(?:short\s+|quick\s+)?video\s*(?:clip\s*)?(?:of|about|showing|where|with|:)?\s*)",
     re.IGNORECASE,
 )
+
+# Image, animation, edit, and cinema-clip tools all need the resident chat
+# model off the card before they run.
+GPU_HEAVY_TOOLS = frozenset({
+    "generate_image", "generate_animation", "edit_image", "generate_video",
+})
 
 
 def user_wants_video_generation(message: str) -> bool:
     """True for explicit new-video requests; GIF/animation phrasing stays with generate_animation."""
     if not message or not message.strip():
+        return False
+    from backend.tools.video_pipeline_tools import is_music_video_request, is_film_crew_request
+    if is_music_video_request(message) or is_film_crew_request(message):
         return False
     msg_lower = message.lower()
     if _SLASH_MEDIA_RE.match(msg_lower):
@@ -629,6 +712,21 @@ _WORKSTATION_DIRECT = (
         r"is self[- ]improvement (?:on|enabled))\b",
         re.I,
     ), "self_improvement_status", {}),
+)
+
+
+# Direct-dispatched workstation tools answer in prose. Their output is a
+# status payload (module counts, VRAM, log lines); handing it back verbatim
+# was a dict dump with machine paths in it (observed 2026-09-05). The raw
+# result still rides the tool card.
+_WORKSTATION_PROSE_TOOLS = frozenset(
+    {"map_codebase", "inspect_gpu", "read_logs", "swarm_status", "self_improvement_status"})
+
+_TOOL_PROSE_SYSTEM = (
+    "You are Guaardvark's assistant. Answer the user's message from the tool "
+    "result below in two to four plain sentences. Lead with the numbers or "
+    "facts that answer the question. Do not print JSON, file paths, "
+    "identifiers or lists of records; the raw result is already shown to the user."
 )
 
 
@@ -1281,6 +1379,70 @@ def get_semantic_selector() -> SemanticToolSelector:
     return _semantic_selector_instance
 
 
+# Inline artifact content rides the chat:tool_result payload and the persisted
+# message row; 64 KB covers a generated CSV or script of a few hundred lines,
+# and anything larger is fetched through its url instead.
+_ARTIFACT_INLINE_MAX_BYTES = 64 * 1024
+_ARTIFACT_PATH_KEYS = ("output_path", "file_path")
+
+
+def _artifact_for_result(res) -> Optional[Dict[str, Any]]:
+    """Describe the file a tool wrote, or None when it wrote nothing.
+
+    Looks for ``output_path`` / ``file_path`` in a ToolResult's dict output or
+    metadata and returns the chat:tool_result ``artifact`` object: filename,
+    file_type, size_bytes, url (``/api/outputs/<relative path>`` when the file
+    is inside OUTPUT_DIR, else None), content (text files up to the inline
+    limit) and content_truncated.
+    """
+    path = None
+    for container in (getattr(res, "output", None), getattr(res, "metadata", None)):
+        if not isinstance(container, dict):
+            continue
+        for key in _ARTIFACT_PATH_KEYS:
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                path = value.strip()
+                break
+        if path:
+            break
+    if not path:
+        return None
+    try:
+        file_path = Path(path).expanduser().resolve()
+        if not file_path.is_file():
+            return None
+        size = file_path.stat().st_size
+    except (OSError, ValueError):
+        return None
+
+    url = None
+    try:
+        import backend.config as _cfg
+        rel = file_path.relative_to(Path(_cfg.OUTPUT_DIR).resolve())
+        url = "/api/outputs/" + rel.as_posix()
+    except (ValueError, OSError):
+        url = None
+
+    artifact: Dict[str, Any] = {
+        "filename": file_path.name,
+        "file_type": file_path.suffix.lstrip(".").lower(),
+        "size_bytes": size,
+        "url": url,
+        "content_truncated": size > _ARTIFACT_INLINE_MAX_BYTES,
+    }
+    if size <= _ARTIFACT_INLINE_MAX_BYTES:
+        try:
+            raw = file_path.read_bytes()
+            # A NUL byte marks a binary file (image, archive); its bytes are
+            # not useful inline, so only the url is offered.
+            if b"\x00" not in raw:
+                artifact["content"] = raw.decode("utf-8", errors="replace")
+        except OSError:
+            pass
+    return artifact
+
+
 class UnifiedChatEngine:
     """Core engine combining RAG + tools + conversation in one ReACT loop."""
 
@@ -1462,6 +1624,15 @@ class UnifiedChatEngine:
         edit_result = self._try_image_edit_direct(message, session_id, emit_fn, request_id, options)
         if edit_result is not None:
             return edit_result
+
+        # Music-video / Film Crew create-and-plan. Must run BEFORE generate_video:
+        # "make a music video" matches the generic video create-verb.
+        mv_result = self._try_music_video_direct(message, session_id, emit_fn, request_id, options)
+        if mv_result is not None:
+            return mv_result
+        fc_result = self._try_film_crew_direct(message, session_id, emit_fn, request_id, options)
+        if fc_result is not None:
+            return fc_result
 
         # Natural language VIDEO generation ("generate a video of ...") → direct
         # generate_video. Must run BEFORE the image intercept: "video of" is also in
@@ -1737,6 +1908,8 @@ class UnifiedChatEngine:
 
         # 6. ReACT loop
         accumulated_response = ""
+        final_thinking = ""       # reasoning behind the final answer (chat:complete + extra_data)
+        final_truncated = False   # Ollama stopped the final answer at num_predict
         iteration = 0
         tools_called = False  # Track if any tools were successfully called
         tool_output_snippets: List[str] = []  # Track tool outputs for grounding check
@@ -1758,6 +1931,7 @@ class UnifiedChatEngine:
         log_user_message("unified_chat", message, session_id=session_id)
 
         wrap_up_nudge_pushed = False
+        tool_list_echo_retried = False
         for iteration in range(1, self.max_iterations + 1):
             if is_aborted(session_id):
                 emit_fn("chat:complete", {
@@ -1799,7 +1973,9 @@ class UnifiedChatEngine:
                     ollama_messages, emit_fn, session_id,
                     emit_tokens=True,
                     max_tokens=AGENTIC_MAX_TOKENS_FINAL,
+                    iteration=iteration,
                 )
+                _llm_meta = getattr(self, "_last_llm_call_meta", None) or {}
                 token_usage["input_tokens"] += in_tok
                 token_usage["output_tokens"] += out_tok
                 log_llm_response("unified_chat", llm_response, session_id=session_id, iteration=iteration)
@@ -1869,8 +2045,26 @@ class UnifiedChatEngine:
                 tool_names = [tc.tool_name for tc in parsed.tool_calls]
                 logger.info(f"[UNIFIED_ENGINE] iter={iteration} TOOL_CALLS: {tool_names}")
             else:
-                logger.info(f"[UNIFIED_ENGINE] iter={iteration} NO tool calls, returning final answer")
                 final_text = parsed.final_answer or llm_response.strip()
+                # A tool-list echo is non-empty, so the reasoning-only retry in
+                # _call_llm_streaming never sees it; repeat the turn once here,
+                # thinking off, the same way. Per-request engine, so _think is
+                # safe to flip for the rest of this turn.
+                if _looks_like_tool_list_echo(
+                    final_text, [getattr(t, "name", t) for t in self.registry.list_tools()],
+                ):
+                    if not tool_list_echo_retried and not is_aborted(session_id):
+                        tool_list_echo_retried = True
+                        logger.info(
+                            f"[UNIFIED_ENGINE] iter={iteration} reply echoed the tool list "
+                            f"({len(final_text)} chars); re-asking with thinking off"
+                        )
+                        ollama_messages.append({"role": "system", "content": _ANSWER_NOT_TOOL_LIST_NUDGE})
+                        self._think = False
+                        continue
+                    final_text = _TOOL_LIST_ECHO_FALLBACK_TEXT
+                    emit_fn("chat:token", {"content": final_text, "session_id": session_id})
+                logger.info(f"[UNIFIED_ENGINE] iter={iteration} NO tool calls, returning final answer")
                 final_text = re.sub(r'\u003c/?(?:tool_call|tool|observation)[^\u003e]*\u003e', '', final_text).strip()
 
                 log_decision("unified_chat", "FINAL_ANSWER", {
@@ -1896,6 +2090,8 @@ class UnifiedChatEngine:
                     final_text = "I'm sorry, I couldn't generate a response."
 
                 accumulated_response = final_text
+                final_thinking = str(_llm_meta.get("thinking") or "")
+                final_truncated = bool(_llm_meta.get("truncated"))
                 break
 
             # 6e. Execute each tool call
@@ -2069,7 +2265,6 @@ class UnifiedChatEngine:
             # Image/video generation needs ~3.5GB+ VRAM. The Ollama LLM stays
             # resident for its default 5-min keep_alive, competing for the GPU.
             # Evict it now so the SD pipeline can load without OOM.
-            GPU_HEAVY_TOOLS = {"generate_image", "generate_animation", "edit_image"}
             if GPU_HEAVY_TOOLS.intersection(t_name for _, t_name, _ in tool_jobs):
                 try:
                     from backend.services.gpu_resource_policy import evict_ollama_models
@@ -2089,19 +2284,27 @@ class UnifiedChatEngine:
                     return str(res.output) if not isinstance(res.output, str) else res.output
                 return ""
 
+            artifacts_by_index: dict = {}   # job_index -> artifact dict (files a tool wrote)
+
             def _emit_result(job_i: int, res, dur_ms: int) -> None:
                 """Thread-safe result emission."""
                 _, t_name, t_params = tool_jobs[job_i]
                 out = _output_str(res)
                 output_limit = 4000 if t_name == "edit_code" else 2000
+                result_payload = {
+                    "success": res.success,
+                    "output": out[:output_limit] if res.success else None,
+                    "error": res.error if not res.success else None,
+                }
+                artifact = _artifact_for_result(res) if res.success else None
+                if artifact:
+                    result_payload["artifact"] = artifact
                 with _emit_lock:
+                    if artifact:
+                        artifacts_by_index[job_i] = artifact
                     emit_fn("chat:tool_result", {
                         "tool": t_name,
-                        "result": {
-                            "success": res.success,
-                            "output": out[:output_limit] if res.success else None,
-                            "error": res.error if not res.success else None,
-                        },
+                        "result": result_payload,
                         "duration_ms": dur_ms,
                     })
                     # Emit image event if tool result contains an image URL
@@ -2281,13 +2484,16 @@ class UnifiedChatEngine:
                         tool_output_snippets.append(out[:300])
 
                 preview_limit = 1200 if tool_name == "edit_code" else 200
-                step_info["tool_calls"].append({
+                step_call = {
                     "tool_name": tool_name,
                     "params": params,
                     "success": result.success,
                     "duration_ms": duration_ms,
                     "output_preview": out[:preview_limit] if result.success else result.error,
-                })
+                }
+                if job_i in artifacts_by_index:
+                    step_call["artifact"] = artifacts_by_index[job_i]
+                step_info["tool_calls"].append(step_call)
 
                 formatted = format_tool_result_for_llm(tool_name, result, format='xml')
                 if not result.success:
@@ -2299,7 +2505,7 @@ class UnifiedChatEngine:
                     )
                 # Cap tool result text to reduce context bloat between iterations
                 if len(formatted) > 500:
-                    formatted = formatted[:500] + "... [truncated]"
+                    formatted = cut_on_whitespace(formatted, 500) + "... [truncated]"
                 observation_text += formatted + "\n"
 
             # Append any blocked-call observations
@@ -2370,9 +2576,9 @@ class UnifiedChatEngine:
             # append the "Latest tool results" that would trigger another LLM call (which
             # would hit the evicted model). The image is already emitted via chat:image.
             # This prevents the "LLM call failed" after GPU image job.
-            _heavy_image = {"generate_image", "generate_animation", "edit_image"}
+            _inline_image_tools = frozenset({"generate_image", "generate_animation", "edit_image"})
             last_tool_was_image_success = any(
-                (tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", None)) in _heavy_image
+                (tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", None)) in _inline_image_tools
                 and (tc.get("success") if isinstance(tc, dict) else True)
                 for s in steps[-1:] for tc in (s.get("tool_calls") or [])
             )
@@ -2409,8 +2615,7 @@ class UnifiedChatEngine:
             # finish loading before the next _call_llm_streaming in the next iteration.
             # Non-blocking best-effort; the backoff recovery in _call_llm_streaming is the
             # safety net.
-            _heavy = {"generate_image", "generate_animation", "edit_image"}
-            if any((tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", None)) in _heavy
+            if any((tc.get("tool_name") if isinstance(tc, dict) else getattr(tc, "tool_name", None)) in GPU_HEAVY_TOOLS
                    for s in steps[-1:] for tc in (s.get("tool_calls") or [])):
                 try:
                     self._warmup_chat_llm_async(session_id)
@@ -2442,6 +2647,8 @@ class UnifiedChatEngine:
             "request_id": request_id,
             "token_usage": token_usage,
             "generated_images": generated_images,
+            "thinking": final_thinking,
+            "truncated": final_truncated,
         })
 
         # 8. Save assistant message (only if we have actual content)
@@ -2454,11 +2661,18 @@ class UnifiedChatEngine:
                 r'analysis_type|include_metadata)[^>]*>',
                 '', accumulated_response
             ).strip()
+            # The bracket form thinking models are prompted with, so a leaked
+            # [tool_call] never re-enters the model's context as history.
+            clean_response = re.sub(
+                r'\[/?(?:tool_call|tool|observation)[^\]]*\]', '', clean_response
+            ).strip()
             # Collapse runs of whitespace left by tag removal
             clean_response = re.sub(r'\n{3,}', '\n\n', clean_response)
             extra_data = {"steps": steps, "iterations": iteration} if steps else {}
             if generated_images:
                 extra_data["generatedImages"] = generated_images
+            if final_thinking:
+                extra_data["thinking"] = final_thinking
             # Pull agent-loop thinking steps emitted during this turn so they
             # survive hard refresh. Empty list if no agent task ran. Drains the
             # service's accumulator so the next turn starts fresh.
@@ -2604,6 +2818,27 @@ class UnifiedChatEngine:
             "edit_image", params, session_id, emit_fn, request_id, message, options,
         )
 
+    def _prose_for_tool_result(self, tool_name: str, user_message: str, output: Any,
+                               emit_fn: Callable, session_id: str) -> str:
+        """One bounded LLM call that turns a workstation tool's payload into an
+        answer; the payload itself is the fallback when the model has nothing."""
+        from backend.utils.agent_output_parser import relativize_local_paths
+        raw = relativize_local_paths(str(output))
+        messages = [
+            {"role": "system", "content": _TOOL_PROSE_SYSTEM},
+            {"role": "user", "content": (
+                f"The user asked: {user_message}\n\n"
+                f"The tool {tool_name} returned:\n{raw[:6000]}")},
+        ]
+        try:
+            text, _in, _out = self._call_llm_streaming(
+                messages, emit_fn, session_id, emit_tokens=True, max_tokens=320)
+        except Exception as exc:
+            logger.warning("prose for %s failed, returning the payload: %s", tool_name, exc)
+            return raw
+        text = (text or "").strip()
+        return text if text and text != _REASONING_ONLY_FALLBACK_TEXT else raw
+
     def _run_direct_tool_execution(
         self,
         tool_name: str,
@@ -2666,14 +2901,15 @@ class UnifiedChatEngine:
                 }
             return {"success": False, "error": str(exc), "request_id": request_id, "session_id": session_id}
 
-        emit_fn("chat:tool_result", {
-            "tool": tool_name,
-            "result": {
-                "success": result.success,
-                "output": str(result.output)[:2000] if result.success else None,
-                "error": result.error if not result.success else None,
-            },
-        })
+        _direct_result = {
+            "success": result.success,
+            "output": str(result.output)[:2000] if result.success else None,
+            "error": result.error if not result.success else None,
+        }
+        _direct_artifact = _artifact_for_result(result) if result.success else None
+        if _direct_artifact:
+            _direct_result["artifact"] = _direct_artifact
+        emit_fn("chat:tool_result", {"tool": tool_name, "result": _direct_result})
 
         generated_images = []
         video_url = (result.metadata or {}).get("video_url") if result.success else None
@@ -2745,6 +2981,9 @@ class UnifiedChatEngine:
             response = "Here's the generated video."
         elif result.success and image_url:
             response = "Here's the generated image." if tool_name == "generate_image" else str(result.output)
+        elif result.success and tool_name in _WORKSTATION_PROSE_TOOLS:
+            response = self._prose_for_tool_result(
+                tool_name, user_message, result.output, emit_fn, session_id)
         elif result.success:
             response = str(result.output)
         else:
@@ -2772,20 +3011,19 @@ class UnifiedChatEngine:
         # this the direct fast-path saved only generatedImages, so the params/result
         # card vanished on reload (live-only). output_preview mirrors the live
         # chat:tool_result payload ([:2000]) so persisted == live.
-        _direct_step = {
-            "iteration": 1,
-            "thoughts": "",
-            "tool_calls": [{
-                "tool_name": tool_name,
-                "params": params,
-                "success": bool(result.success),
-                "duration_ms": _dur_ms,
-                "output_preview": (
-                    str(result.output)[:2000] if result.success
-                    else (result.error or "")[:2000]
-                ),
-            }],
+        _direct_call = {
+            "tool_name": tool_name,
+            "params": params,
+            "success": bool(result.success),
+            "duration_ms": _dur_ms,
+            "output_preview": (
+                str(result.output)[:2000] if result.success
+                else (result.error or "")[:2000]
+            ),
         }
+        if _direct_artifact:
+            _direct_call["artifact"] = _direct_artifact
+        _direct_step = {"iteration": 1, "thoughts": "", "tool_calls": [_direct_call]}
         if extra_data is None:
             extra_data = {}
         extra_data["steps"] = [_direct_step]
@@ -3109,6 +3347,83 @@ class UnifiedChatEngine:
             "generate_video", {"prompt": prompt}, session_id, emit_fn, request_id, message, options
         )
 
+    def _pipeline_usage_notice(
+        self, session_id: str, emit_fn: Callable, request_id: str,
+        user_message: str, text: str,
+    ) -> Dict[str, Any]:
+        self._save_message(session_id, "user", user_message)
+        emit_fn("chat:complete", {
+            "response": text, "iterations": 0, "steps": [],
+            "session_id": session_id, "request_id": request_id,
+        })
+        self._save_message(session_id, "assistant", text)
+        return {
+            "success": True, "response": text, "iterations": 0, "steps": [],
+            "request_id": request_id, "session_id": session_id,
+        }
+
+    def _try_music_video_direct(self, message: str, session_id: str,
+                                emit_fn: Callable, request_id: str,
+                                options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Start a music-video plan. Does not approve or render clips."""
+        from backend.tools.video_pipeline_tools import (
+            parse_music_video_nl, wants_music_video,
+        )
+        if not message or not message.strip():
+            return None
+        is_slash = bool(re.match(r"^\s*/music-video\b", message, re.IGNORECASE))
+        if not is_slash and not wants_music_video(message):
+            return None
+        if not is_slash and _media_requires_explicit_command():
+            return None
+        if not self.registry.get_tool("generate_music_video"):
+            return None
+        parsed = parse_music_video_nl(message)
+        if not parsed.get("song") or not parsed.get("style_prompt"):
+            return self._pipeline_usage_notice(
+                session_id, emit_fn, request_id, message,
+                "To start a music video I need a song (document id or audio path) "
+                "and a visual style. Example: make a music video from song.mp3 neon noir rain. "
+                "Approve the cut plan in Studio before any clip renders.",
+            )
+        logger.info("Music-video direct: song=%r style=%r", parsed["song"], parsed["style_prompt"][:80])
+        return self._run_direct_tool_execution(
+            "generate_music_video",
+            {"song": parsed["song"], "style_prompt": parsed["style_prompt"]},
+            session_id, emit_fn, request_id, message, options,
+        )
+
+    def _try_film_crew_direct(self, message: str, session_id: str,
+                              emit_fn: Callable, request_id: str,
+                              options: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """Start a Film Crew production. Does not render shots."""
+        from backend.tools.video_pipeline_tools import (
+            parse_film_crew_nl, wants_film_crew,
+        )
+        if not message or not message.strip():
+            return None
+        is_slash = bool(re.match(r"^\s*/film-crew\b", message, re.IGNORECASE))
+        if not is_slash and not wants_film_crew(message):
+            return None
+        if not is_slash and _media_requires_explicit_command():
+            return None
+        if not self.registry.get_tool("start_film_crew"):
+            return None
+        parsed = parse_film_crew_nl(message)
+        if not parsed.get("script_text"):
+            return self._pipeline_usage_notice(
+                session_id, emit_fn, request_id, message,
+                "To start Film Crew I need a screenplay or a path to one. "
+                "Example: film this script INT. KITCHEN — a kettle boils. "
+                "Casting, storyboards and renders wait in Studio.",
+            )
+        logger.info("Film-crew direct: script=%r", parsed["script_text"][:80])
+        return self._run_direct_tool_execution(
+            "start_film_crew",
+            {"script_text": parsed["script_text"]},
+            session_id, emit_fn, request_id, message, options,
+        )
+
     def _native_tool_calls_to_response(self, native_calls, llm_response: str):
         """Convert Ollama-native message.tool_calls into a ToolCallResponse.
 
@@ -3168,20 +3483,28 @@ class UnifiedChatEngine:
 
     def _call_llm_streaming(self, messages: List[Dict[str, str]], emit_fn: Callable,
                              session_id: str, emit_tokens: bool = True,
-                             max_tokens: int = 768
+                             max_tokens: int = 768, iteration: int = 1,
                              ) -> tuple:
         """Call the LLM with streaming via Ollama client directly.
 
         Bypasses LlamaIndex's PromptHelper entirely, avoiding context_window issues.
-        Streams tokens to the client via Socket.IO when emit_tokens is True.
+        Streams visible tokens as ``chat:token`` and a thinking model's reasoning
+        as ``chat:reasoning`` (batched deltas, then one ``done`` event with the
+        full text) when emit_tokens is True. Reasoning never enters the returned
+        text.
 
         Args:
-            max_tokens: Maximum tokens to generate (num_predict). Lower for tool
-                        iterations (512), higher for final answers (1024).
+            max_tokens: Answer budget (num_predict). With thinking on, the
+                        reasoning budget from config is added on top.
+            iteration: ReACT iteration tagged on ``chat:reasoning`` events.
 
         Returns:
             (text, input_tokens, output_tokens) — token counts come from the
             final ``done=True`` chunk that Ollama appends after the stream.
+            Per-call details that do not fit the tuple are left on
+            ``self._last_llm_call_meta``: ``thinking`` (str), ``done_reason``
+            (str or None) and ``truncated`` (True when Ollama stopped at
+            num_predict).
         """
         try:
             import ollama
@@ -3232,20 +3555,73 @@ class UnifiedChatEngine:
         accumulated_thinking = []
         input_tokens = 0
         output_tokens = 0
+        done_reason = None
+        self._last_llm_call_meta = {"thinking": "", "done_reason": None, "truncated": False}
 
-        # Detect thinking models (gemma4, deepseek-r1, etc.) that put output
+        # Detect thinking models (gemma4, qwen3, deepseek-r1, ...) that put output
         # in the "thinking" field and may crash Ollama's JSON serializer
         # when thinking content contains XML-like tags. (N/A for cloud providers.)
-        is_thinking_model = (not _use_cloud) and any(t in model_name.lower() for t in ("deepseek-r1", "thinking", "gemma4", "gemma-4"))
+        # One predicate for the whole product: name patterns, then Ollama's
+        # capabilities list, so a model the pattern list has not met still counts.
+        from backend.utils.ollama_resource_manager import model_supports_thinking
+        is_thinking_model = (not _use_cloud) and model_supports_thinking(model_name)
+        think_on = is_thinking_model and bool(getattr(self, "_think", False))
 
         # Track <think>...</think> blocks in the content stream so we can
         # suppress them from being emitted as visible tokens.
         in_think_block = False
         think_buffer = ""
 
+        # Reasoning (message.thinking) goes out on its own channel, batched;
+        # it must never reach chat:token or the returned content.
+        reasoning_buf: List[str] = []
+        reasoning_last_flush = time.time()
+        num_predict = max_tokens
+
+        def _flush_reasoning(force: bool = False) -> None:
+            nonlocal reasoning_last_flush
+            if not reasoning_buf:
+                return
+            pending = "".join(reasoning_buf)
+            if not force and len(pending) < _REASONING_FLUSH_CHARS \
+                    and (time.time() - reasoning_last_flush) < _REASONING_FLUSH_SECS:
+                return
+            reasoning_buf.clear()
+            reasoning_last_flush = time.time()
+            if emit_tokens:
+                emit_fn("chat:reasoning", {
+                    "session_id": session_id, "iteration": iteration, "delta": pending,
+                })
+
+        def _finish_call(thinking: str, content_len: int) -> None:
+            """Close the reasoning channel and record per-call metadata for the caller."""
+            _flush_reasoning(force=True)
+            if emit_tokens:
+                emit_fn("chat:reasoning", {
+                    "session_id": session_id, "iteration": iteration,
+                    "done": True, "text": thinking,
+                })
+            truncated = done_reason == "length"
+            if truncated:
+                logger.warning(
+                    f"LLM output truncated (done_reason=length) model={model_name} "
+                    f"num_predict={num_predict} eval_count={output_tokens} "
+                    f"prompt_eval_count={input_tokens} thinking_chars={len(thinking)} "
+                    f"content_chars={content_len}"
+                )
+            self._last_llm_call_meta = {
+                "thinking": thinking, "done_reason": done_reason, "truncated": truncated,
+            }
+
         try:
-            # Use adaptive num_ctx from LLM instance, with resource-aware fallback
-            ctx_window = getattr(self.llm, "context_window", None)
+            # Use adaptive num_ctx from LLM instance, with resource-aware fallback.
+            # A boot-time placeholder (Ollama not yet answering /api/show) is
+            # re-resolved here on first use instead of pinning the process.
+            try:
+                from backend.utils.ollama_resource_manager import refresh_context_window
+                ctx_window = refresh_context_window(self.llm)
+            except Exception:
+                ctx_window = getattr(self.llm, "context_window", None)
             if not ctx_window or ctx_window <= 0:
                 try:
                     from backend.utils.ollama_resource_manager import compute_optimal_num_ctx
@@ -3263,6 +3639,22 @@ class UnifiedChatEngine:
                     f"{ctx_window}-token window. Pruning messages..."
                 )
                 messages = self._prune_messages_to_fit(messages, ctx_window)
+                estimated = self._estimate_tokens(messages)
+
+            # Ollama counts reasoning tokens against num_predict, so a thinking
+            # call gets the extra budget on top of the answer budget. The cap
+            # keeps prompt + generation inside the context window but never
+            # drops below max_tokens: the cap only removes thinking headroom.
+            if think_on:
+                from backend.config import AGENTIC_THINKING_TOKEN_BUDGET
+                num_predict = max_tokens + AGENTIC_THINKING_TOKEN_BUDGET
+                room = max(int(ctx_window) - estimated, max_tokens)
+                if num_predict > room:
+                    logger.info(
+                        f"Thinking budget capped: num_predict {num_predict} -> {room} "
+                        f"(ctx={ctx_window}, prompt~{estimated}, answer={max_tokens})"
+                    )
+                    num_predict = room
 
             # Sampling knobs come from services.sampling_profiles (single source
             # of truth) so runtime chat matches what get_default_llm builds and
@@ -3272,7 +3664,7 @@ class UnifiedChatEngine:
             opts = sampling_profiles.profile_options(
                 sampling_profiles.DEFAULT_PROFILE,
                 num_ctx=ctx_window,
-                num_predict=max_tokens,
+                num_predict=num_predict,
                 extra={"num_keep": -1},
             )
 
@@ -3332,91 +3724,145 @@ class UnifiedChatEngine:
             # visible content tokens normally (no XML suppression).
             xml_detected = False
             _native_tool_calls_acc = []  # collected message.tool_calls (native path)
-            for chunk in stream:
-                if is_aborted(session_id):
-                    break
-                msg = chunk.get("message", {})
-                token = msg.get("content", "")
-                thinking_token = msg.get("thinking", "")
-                # Native path: collect any structured tool_calls from this chunk.
-                if _native_active:
-                    _tc = None
-                    try:
-                        _tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
-                    except Exception:
+
+            def _consume(chunks) -> None:
+                """Drain one Ollama stream into the accumulators, emitting visible tokens."""
+                nonlocal xml_detected, in_think_block, think_buffer
+                nonlocal input_tokens, output_tokens, done_reason
+                for chunk in chunks:
+                    if is_aborted(session_id):
+                        break
+                    msg = chunk.get("message", {})
+                    token = msg.get("content", "")
+                    thinking_token = msg.get("thinking", "")
+                    # Native path: collect any structured tool_calls from this chunk.
+                    if _native_active:
                         _tc = None
-                    if _tc:
-                        _native_tool_calls_acc.extend(_tc)
-                if token:
-                    accumulated.append(token)
-                    if emit_tokens and not xml_detected:
-                        # Check if we've hit a tool_call tag in the accumulated text
-                        # Use last 20 chunks to handle slow-chunk Ollama streams.
-                        # On the native path tool calls are out-of-band (structured
-                        # message.tool_calls), so this XML heuristic must never fire.
-                        if not _native_active and (
-                            "<tool_call" in "".join(accumulated[-20:])
-                            or "<tool>" in "".join(accumulated[-20:])
-                        ):
-                            xml_detected = True
-                        else:
-                            # Filter out <think>...</think> blocks from content stream
-                            emit_token = token
-                            if is_thinking_model:
-                                think_buffer += token
-                                if not in_think_block:
-                                    if "<think>" in think_buffer:
-                                        # Emit anything before the <think> tag
-                                        before = think_buffer.split("<think>", 1)[0]
-                                        if before:
-                                            emit_fn("chat:token", {"content": before, "session_id": session_id})
-                                        in_think_block = True
-                                        think_buffer = think_buffer.split("<think>", 1)[1]
-                                        emit_token = None
-                                    elif len(think_buffer) > 20:
-                                        # No <think> tag detected, flush buffer
-                                        emit_fn("chat:token", {"content": think_buffer, "session_id": session_id})
-                                        think_buffer = ""
-                                        emit_token = None
+                        try:
+                            _tc = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
+                        except Exception:
+                            _tc = None
+                        if _tc:
+                            _native_tool_calls_acc.extend(_tc)
+                    if token:
+                        # Reasoning precedes the answer; send any held tail
+                        # before the first visible token so the channel is
+                        # complete when the answer starts.
+                        _flush_reasoning(force=True)
+                        accumulated.append(token)
+                        if emit_tokens and not xml_detected:
+                            # Check if we've hit a tool_call tag in the accumulated text
+                            # Use last 20 chunks to handle slow-chunk Ollama streams.
+                            # On the native path tool calls are out-of-band (structured
+                            # message.tool_calls), so this XML heuristic must never fire.
+                            # Thinking models are prompted with the bracket form
+                            # ([tool_call], [tool]) because their system prompt is
+                            # sanitized, so the suppressor must recognise both.
+                            _tail = "".join(accumulated[-20:])
+                            if not _native_active and (
+                                "<tool_call" in _tail or "<tool>" in _tail
+                                or "[tool_call" in _tail or "[tool]" in _tail
+                            ):
+                                xml_detected = True
+                            else:
+                                # Filter out <think>...</think> blocks from content stream
+                                emit_token = token
+                                if is_thinking_model:
+                                    think_buffer += token
+                                    if not in_think_block:
+                                        if "<think>" in think_buffer:
+                                            # Emit anything before the <think> tag
+                                            before = think_buffer.split("<think>", 1)[0]
+                                            if before:
+                                                emit_fn("chat:token", {"content": before, "session_id": session_id})
+                                            in_think_block = True
+                                            think_buffer = think_buffer.split("<think>", 1)[1]
+                                            emit_token = None
+                                        elif len(think_buffer) > 20:
+                                            # No <think> tag detected: flush, but keep a
+                                            # trailing "[tool_" / "<tool" that may be the
+                                            # start of tool markup arriving token by token.
+                                            _head, think_buffer = _split_pending_tool_marker(think_buffer)
+                                            if _head:
+                                                emit_fn("chat:token", {"content": _head, "session_id": session_id})
+                                            emit_token = None
+                                        else:
+                                            # Still buffering, don't emit yet
+                                            emit_token = None
                                     else:
-                                        # Still buffering, don't emit yet
+                                        # Inside <think> block — suppress output
+                                        if "</think>" in think_buffer:
+                                            # End of think block, emit anything after
+                                            after = think_buffer.split("</think>", 1)[1]
+                                            think_buffer = after if after else ""
+                                            in_think_block = False
+                                            if after:
+                                                emit_fn("chat:token", {"content": after, "session_id": session_id})
+                                                think_buffer = ""
                                         emit_token = None
-                                else:
-                                    # Inside <think> block — suppress output
-                                    if "</think>" in think_buffer:
-                                        # End of think block, emit anything after
-                                        after = think_buffer.split("</think>", 1)[1]
-                                        think_buffer = after if after else ""
-                                        in_think_block = False
-                                        if after:
-                                            emit_fn("chat:token", {"content": after, "session_id": session_id})
-                                            think_buffer = ""
-                                    emit_token = None
-                            if emit_token:
-                                emit_fn("chat:token", {"content": emit_token, "session_id": session_id})
-                if thinking_token:
-                    accumulated_thinking.append(thinking_token)
-                # The final chunk (done=True) carries token-usage stats
-                if chunk.get("done"):
-                    input_tokens = chunk.get("prompt_eval_count", 0) or 0
-                    output_tokens = chunk.get("eval_count", 0) or 0
+                                if emit_token:
+                                    emit_fn("chat:token", {"content": emit_token, "session_id": session_id})
+                    if thinking_token:
+                        accumulated_thinking.append(thinking_token)
+                        reasoning_buf.append(thinking_token)
+                        _flush_reasoning()
+                    # The final chunk (done=True) carries token-usage stats
+                    if chunk.get("done"):
+                        input_tokens = chunk.get("prompt_eval_count", 0) or 0
+                        output_tokens = chunk.get("eval_count", 0) or 0
+                        done_reason = chunk.get("done_reason") or None
 
-            # Flush any remaining think_buffer (non-think text that was still buffered)
-            if think_buffer and not in_think_block and emit_tokens:
-                emit_fn("chat:token", {"content": think_buffer, "session_id": session_id})
+            def _visible_content() -> str:
+                nonlocal think_buffer
+                # Flush any remaining think_buffer (non-think text that was still
+                # buffered). Not when tool markup was detected: the buffer then
+                # holds the opening characters of that markup ("[tool_").
+                if think_buffer and not in_think_block and emit_tokens and not xml_detected:
+                    emit_fn("chat:token", {"content": think_buffer, "session_id": session_id})
+                think_buffer = ""
+                text = "".join(accumulated).strip()
+                # Strip <think>...</think> blocks from final content
+                if is_thinking_model:
+                    text = re.sub(r'<think>[\s\S]*?</think>\s*', '', text).strip()
+                return text
 
-            content = "".join(accumulated).strip()
+            _consume(stream)
+            content = _visible_content()
             thinking = "".join(accumulated_thinking).strip()
 
-            # Strip <think>...</think> blocks from final content
-            if is_thinking_model:
-                content = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
-
-            # Thinking models often put all useful output in the thinking field
-            # and leave content empty. Use thinking as fallback.
-            if not content and thinking:
-                logger.info(f"Using thinking field as response ({len(thinking)} chars, model: {model_name})")
-                content = thinking
+            # Reasoning without an answer: ask once more with thinking off, and
+            # say so plainly if that still yields nothing. The reasoning text is
+            # never promoted to content.
+            if (
+                not content and thinking and not _use_cloud
+                and not _native_tool_calls_acc and not is_aborted(session_id)
+            ):
+                logger.info(
+                    f"Model returned reasoning only ({len(thinking)} chars, model: {model_name}); "
+                    "re-asking for the answer with thinking off"
+                )
+                retry_kwargs = dict(_chat_kwargs)
+                retry_kwargs["think"] = False
+                retry_kwargs["messages"] = list(call_messages) + [
+                    {"role": "system", "content": _ANSWER_AFTER_REASONING_NUDGE},
+                ]
+                retry_kwargs["options"] = sampling_profiles.profile_options(
+                    sampling_profiles.DEFAULT_PROFILE,
+                    num_ctx=ctx_window,
+                    num_predict=max_tokens,
+                    extra={"num_keep": -1},
+                )
+                accumulated.clear()
+                xml_detected = False
+                in_think_block = False
+                think_buffer = ""
+                _consume(ollama.chat(**retry_kwargs))
+                content = _visible_content()
+                thinking = "".join(accumulated_thinking).strip()
+                if not content and not _native_tool_calls_acc:
+                    content = _REASONING_ONLY_FALLBACK_TEXT
+                    if emit_tokens:
+                        emit_fn("chat:token", {"content": content, "session_id": session_id})
 
             # Native path: hand the collected structured tool_calls back to the
             # ReACT loop out-of-band (the return signature is fixed at
@@ -3425,6 +3871,7 @@ class UnifiedChatEngine:
             if _native_active:
                 self._native_pending_tool_calls = _native_tool_calls_acc or None
 
+            _finish_call(thinking, len(content))
             return content, input_tokens, output_tokens
 
         except Exception as e:
@@ -3435,12 +3882,17 @@ class UnifiedChatEngine:
                 logger.warning(f"Thinking model serialization error, retrying with sanitized prompt: {error_str}")
                 try:
                     sanitized = self._sanitize_messages_for_thinking_model(messages, aggressive=True)
-                    stream = ollama.chat(
+                    # The retry keeps the turn's thinking choice; rebuilding the
+                    # kwargs without it would hand the model its own default (on).
+                    _sanitized_kwargs = dict(
                         model=model_name,
                         messages=sanitized,
                         stream=True,
                         options=opts,
                     )
+                    if getattr(self, "_think", None) is not None:
+                        _sanitized_kwargs["think"] = bool(self._think)
+                    stream = ollama.chat(**_sanitized_kwargs)
                     for chunk in stream:
                         if is_aborted(session_id):
                             break
@@ -3451,16 +3903,23 @@ class UnifiedChatEngine:
                             accumulated.append(token)
                         if thinking_token:
                             accumulated_thinking.append(thinking_token)
+                            reasoning_buf.append(thinking_token)
+                            _flush_reasoning()
                         if chunk.get("done"):
                             input_tokens = chunk.get("prompt_eval_count", 0) or 0
                             output_tokens = chunk.get("eval_count", 0) or 0
+                            done_reason = chunk.get("done_reason") or None
 
                     content = "".join(accumulated).strip()
                     thinking = "".join(accumulated_thinking).strip()
                     # Strip <think>...</think> blocks from retry content
                     content = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
                     if not content and thinking:
-                        content = thinking
+                        logger.info(f"Sanitized retry returned reasoning only ({len(thinking)} chars)")
+                        content = _REASONING_ONLY_FALLBACK_TEXT
+                        if emit_tokens:
+                            emit_fn("chat:token", {"content": content, "session_id": session_id})
+                    _finish_call(thinking, len(content))
                     return content, input_tokens, output_tokens
                 except Exception as retry_err:
                     logger.error(f"Retry also failed: {retry_err}", exc_info=True)
@@ -3486,7 +3945,10 @@ class UnifiedChatEngine:
                             r'<think>[\s\S]*?</think>\s*', '', text
                         ).strip()
                     if not text and think:
-                        text = think
+                        logger.info(f"Non-stream retry returned reasoning only ({len(think)} chars)")
+                        text = _REASONING_ONLY_FALLBACK_TEXT
+                    if think:
+                        accumulated_thinking.append(think)
                     in_tok = resp.get("prompt_eval_count", 0) or 0
                     out_tok = resp.get("eval_count", 0) or 0
                     native_tc = msg.get("tool_calls") if isinstance(msg, dict) else None
@@ -3504,6 +3966,7 @@ class UnifiedChatEngine:
                         logger.info(f"Ollama EOF non-stream retry succeeded (kind={eof_kind})")
                         if emit_tokens:
                             emit_fn("chat:token", {"content": content, "session_id": session_id})
+                        _finish_call("".join(accumulated_thinking).strip(), len(content))
                         return content, input_tokens, output_tokens
 
                     # Retry B: drop native tools= (force XML path in UCE)
@@ -3517,6 +3980,7 @@ class UnifiedChatEngine:
                             logger.info("Ollama EOF retry succeeded after dropping tools=")
                             if emit_tokens:
                                 emit_fn("chat:token", {"content": content, "session_id": session_id})
+                            _finish_call("".join(accumulated_thinking).strip(), len(content))
                             return content, input_tokens, output_tokens
 
                     # Retry C: runner reload — model not in VRAM or generic runner drop
@@ -3557,15 +4021,19 @@ class UnifiedChatEngine:
                                 accumulated.append(token)
                             if thinking_token:
                                 accumulated_thinking.append(thinking_token)
+                                reasoning_buf.append(thinking_token)
+                                _flush_reasoning()
                             if chunk.get("done"):
                                 input_tokens = chunk.get("prompt_eval_count", 0) or 0
                                 output_tokens = chunk.get("eval_count", 0) or 0
+                                done_reason = chunk.get("done_reason") or None
                         content = "".join(accumulated).strip()
                         content = re.sub(r'<think>[\s\S]*?</think>\s*', '', content).strip()
                         if _native_active:
                             self._native_pending_tool_calls = _native_tool_calls_acc or None
                         if content:
                             logger.info(f"Ollama EOF runner reload retry succeeded (kind={eof_kind})")
+                            _finish_call("".join(accumulated_thinking).strip(), len(content))
                             return content, input_tokens, output_tokens
 
                 except Exception as eof_retry_err:
@@ -3790,12 +4258,12 @@ class UnifiedChatEngine:
             chunks = []
             for r in results or []:
                 source = r.get("metadata", {}).get("source_filename", "Unknown")
-                text = r.get("text", "")[:500]
+                text = cut_on_whitespace(r.get("text", ""), 500)
                 chunks.append(f"[Source: {source}]\n{text}")
             try:
                 from backend.services.knowledge_sources import retrieve_from_sources
                 for hit in retrieve_from_sources(query):
-                    chunks.append(f"[Source: {hit['title']}]\n{hit['snippet'][:500]}")
+                    chunks.append(f"[Source: {hit['title']}]\n{cut_on_whitespace(hit['snippet'], 500)}")
             except Exception as e:
                 logger.debug(f"Knowledge source retrieval skipped: {e}")
             return "\n\n".join(chunks)
@@ -3896,6 +4364,7 @@ class UnifiedChatEngine:
 
     # Keywords that indicate a real-time/current-data query requiring web search.
     # Be specific — broad words like "current" match too many non-realtime queries.
+    # Matched on word boundaries: "weathered" is not "weather".
     _REALTIME_KEYWORDS = (
         "weather", "temperature", "forecast", "right now",
         "today's news", "latest news", "recent news",
@@ -3903,22 +4372,35 @@ class UnifiedChatEngine:
         "breaking news", "how hot", "how cold", "degrees",
         "current events",
     )
-    # If the message contains any of these, it's NOT a realtime query
-    # (prevents image/video generation from being hijacked by web_search).
+    # If the message contains any of these, it's NOT a realtime query: neither
+    # generation requests nor writing tasks should be hijacked by web_search.
     _REALTIME_BLOCKERS = (
         "generate", "create", "draw", "image", "picture", "photo",
         "video", "make me", "build", "design",
+        "write", "rewrite", "prompt", "story", "describe", "essay",
+        "script", "poem", "scene", "dialogue", "lyrics",
     )
+    _REALTIME_KEYWORD_RE = re.compile(
+        r"\b(?:" + "|".join(re.escape(k) for k in _REALTIME_KEYWORDS) + r")\b"
+    )
+    _REALTIME_BLOCKER_RE = re.compile(
+        r"\b(?:" + "|".join(re.escape(k) for k in _REALTIME_BLOCKERS) + r")\b"
+    )
+    # A real-time question ("what's the weather in Boston right now?") is a
+    # sentence or two; past this length the message is a brief for writing or
+    # analysis in which a keyword is incidental.
+    _REALTIME_MAX_CHARS = 600
 
     @staticmethod
     def _is_realtime_query(message: str) -> bool:
         """Return True if the message asks about current/real-time information.
-        Returns False if the message is clearly a generation request."""
-        msg_lower = message.lower()
-        # Generation requests are never realtime queries
-        if any(kw in msg_lower for kw in UnifiedChatEngine._REALTIME_BLOCKERS):
+        Returns False for generation or writing requests and for long briefs."""
+        if not message or len(message) > UnifiedChatEngine._REALTIME_MAX_CHARS:
             return False
-        return any(kw in msg_lower for kw in UnifiedChatEngine._REALTIME_KEYWORDS)
+        msg_lower = message.lower()
+        if UnifiedChatEngine._REALTIME_BLOCKER_RE.search(msg_lower):
+            return False
+        return bool(UnifiedChatEngine._REALTIME_KEYWORD_RE.search(msg_lower))
 
     def _load_rules(self, model_name: str) -> str:
         """Load system prompt rules from database (thread-safe with app context).

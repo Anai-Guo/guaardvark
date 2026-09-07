@@ -20,6 +20,9 @@ export async function executeBuiltinCommand(name, args, context) {
     "/model": handleModel,
     "/imagemodel": handleImageModel,
     "/imagine": handleImagine,
+    "/video": handleVideo,
+    "/music-video": handleMusicVideo,
+    "/film-crew": handleFilmCrew,
     "/websearch": handleWebSearch,
     "/gpu": handleGpu,
     "/logs": handleLogs,
@@ -158,7 +161,7 @@ async function handleModel(args, { addMessage }) {
       ]);
       const active = await activeRes.json();
       const list = await listRes.json();
-      const models = list?.message?.models || list?.data || [];
+      const models = list?.data?.models || list?.message?.models || list?.data || [];
       const modelNames = models.map((m) => m.name || m).slice(0, 20);
       addMessage({
         role: "system",
@@ -303,6 +306,88 @@ async function handleImagine(args, { addMessage, onSendMessage }) {
     image_model: model,
   });
 
+  return { handled: true };
+}
+
+async function handleVideo(args, { addMessage, onSendMessage }) {
+  if (!args) {
+    addMessage({ role: "system", content: "Usage: `/video <prompt>`", tempId: `vid-${Date.now()}`, type: "command" });
+    return { handled: true };
+  }
+
+  onSendMessage(`/video ${args}`, null, {
+    direct_tool: "generate_video",
+    direct_tool_params: { prompt: args },
+    slash_command: "video",
+    slash_args: args,
+  });
+
+  return { handled: true };
+}
+
+const AUDIO_EXT_RE = /\.(mp3|wav|flac|ogg|m4a|aac)$/i;
+
+function parseMusicVideoArgs(args) {
+  const tokens = (args || "").trim().split(/\s+/).filter(Boolean);
+  let song = null;
+  let songIdx = -1;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const cleaned = tokens[i].replace(/^[.,;:"']+|[.,;:"']+$/g, "");
+    if (/^\d+$/.test(cleaned) || AUDIO_EXT_RE.test(cleaned) || cleaned.includes("/")) {
+      song = cleaned;
+      songIdx = i;
+      break;
+    }
+  }
+  const style = tokens.filter((_, i) => i !== songIdx).join(" ").trim();
+  return { song, style_prompt: style || null };
+}
+
+async function handleMusicVideo(args, { addMessage, onSendMessage }) {
+  if (!args) {
+    addMessage({
+      role: "system",
+      content: "Usage: `/music-video <song-path-or-id> <style>` — starts a plan; approve in Studio before clips render.",
+      tempId: `mv-${Date.now()}`,
+      type: "command",
+    });
+    return { handled: true };
+  }
+  const parsed = parseMusicVideoArgs(args);
+  if (!parsed.song || !parsed.style_prompt) {
+    addMessage({
+      role: "system",
+      content: "Need a song (document id or audio path) and a visual style. Example: `/music-video song.mp3 neon noir rain`",
+      tempId: `mv-${Date.now()}`,
+      type: "command",
+    });
+    return { handled: true };
+  }
+  onSendMessage(`/music-video ${args}`, null, {
+    direct_tool: "generate_music_video",
+    direct_tool_params: { song: parsed.song, style_prompt: parsed.style_prompt },
+    slash_command: "music-video",
+    slash_args: args,
+  });
+  return { handled: true };
+}
+
+async function handleFilmCrew(args, { addMessage, onSendMessage }) {
+  if (!args) {
+    addMessage({
+      role: "system",
+      content: "Usage: `/film-crew <screenplay>` — starts the screenwriter; renders wait in Studio.",
+      tempId: `fc-${Date.now()}`,
+      type: "command",
+    });
+    return { handled: true };
+  }
+  onSendMessage(`/film-crew ${args}`, null, {
+    direct_tool: "start_film_crew",
+    direct_tool_params: { script_text: args.trim() },
+    slash_command: "film-crew",
+    slash_args: args,
+  });
   return { handled: true };
 }
 

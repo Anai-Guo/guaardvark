@@ -108,6 +108,17 @@ def _style_clause(style: Optional[str]) -> str:
     return f"\nGlobal visual style/aesthetic to honor: {style}." if style else ""
 
 
+def verbatim_prompts_env_forced() -> bool:
+    """True when VERBATIM_PROMPTS in the environment forces verbatim mode on.
+
+    The Settings toggle cannot turn this off; the settings API reports it so
+    the page can show the switch as forced instead of showing a stored value
+    the generators ignore.
+    """
+    import os
+    return os.environ.get("VERBATIM_PROMPTS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def verbatim_prompts_enabled() -> bool:
     """True when the operator turned ON 'verbatim prompts' — send the user's EXACT words
     to the image/video model and SKIP director-LLM rewrite, offline style stuffing, and
@@ -131,8 +142,7 @@ def verbatim_prompts_enabled() -> bool:
       * ImageGeneratorTool / batch image (auto_enhance)
       * comfyui_video_generator prompt enhance
     """
-    import os
-    if os.environ.get("VERBATIM_PROMPTS", "").strip().lower() in ("1", "true", "yes", "on"):
+    if verbatim_prompts_env_forced():
         return True
     try:
         from flask import has_app_context
@@ -202,6 +212,7 @@ def enhance_prompts(
         # silently returned [] → originals (the batch-director no-op bug, fixed 2026-06-23).
         # Mirror storyboard_from_concept: own chat call + _parse_image_prompts (list-aware).
         import ollama
+        from backend.utils.ollama_resource_manager import think_payload
         opts = _options(n, sampling)
         resp = ollama.chat(
             model=resolved,
@@ -211,6 +222,7 @@ def enhance_prompts(
                 {"role": "user", "content": user},
             ],
             options=opts,
+            **think_payload(resolved),
         )
         out = _parse_image_prompts(resp["message"]["content"], n)
         if len(out) == n:
@@ -247,6 +259,7 @@ def refine_edit_instruction(instruction: str, *, model: Optional[str] = None,
     resolved = _resolve_model(model or DEFAULT_DIRECTOR_MODEL)
     try:
         import ollama
+        from backend.utils.ollama_resource_manager import think_payload
         import json as _json
         resp = ollama.chat(
             model=resolved,
@@ -256,6 +269,7 @@ def refine_edit_instruction(instruction: str, *, model: Optional[str] = None,
                 {"role": "user", "content": f"User edit request: {instr}"},
             ],
             options=_options(1, sampling),
+            **think_payload(resolved),
         )
         data = _json.loads(resp["message"]["content"])
         refined = (data.get("instruction") or "").strip()
@@ -293,6 +307,7 @@ def storyboard_from_concept(
     try:
         # Use a direct chat wrapper for storyboard (rich)
         import ollama
+        from backend.utils.ollama_resource_manager import think_payload
         opts = _options(n, sampling)
         resp = ollama.chat(
             model=resolved,
@@ -302,6 +317,7 @@ def storyboard_from_concept(
                 {"role": "user", "content": user},
             ],
             options=opts,
+            **think_payload(resolved),
         )
         content = resp["message"]["content"]
         data = _parse_storyboard_output(content, n)

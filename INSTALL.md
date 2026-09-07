@@ -39,8 +39,8 @@ The startup script handles everything: Python 3.12 (auto-installed if needed), d
 | Service | URL |
 |---------|-----|
 | Web UI | http://localhost:5173 |
-| API | http://localhost:5000 |
-| Health Check | http://localhost:5000/api/health |
+| API | http://localhost:5000 (macOS: 5055) |
+| Health Check | http://localhost:5000/api/health (macOS: 5055) |
 
 First run may ask for your password once (PostgreSQL, Node.js, or Python packages via apt).
 
@@ -72,12 +72,15 @@ echo 'vm.swappiness=10' | sudo tee /etc/sysctl.d/99-guaardvark.conf && sudo sysc
 
 The same `./start.sh` works on macOS. Known differences, and what to expect:
 
-- **Port 5000 is taken by AirPlay Receiver** on Monterey and later. Either turn it off
-  (System Settings → General → AirDrop & Handoff → AirPlay Receiver) or add
-  `FLASK_PORT=5055` to `.env`. `start.sh` detects the clash and says so.
+- **Port 5000 is taken by AirPlay Receiver** on Monterey and later, so on macOS the backend
+  defaults to **5055** (`start.sh` writes `FLASK_PORT=5055` to `.env` on first start; the web UI,
+  Vite proxy and CLI follow it). Set `FLASK_PORT` yourself to use another port; if you force 5000
+  with AirPlay on, `start.sh` detects the clash and says so.
 - **GPU work runs on Metal (MPS) where the feature supports it.** Image generation and video
   generation via ComfyUI do; features that still need CUDA say so when you start them instead
-  of failing quietly: LoRA training, FX Lab (Stable Audio), ACE-Step song generation.
+  of failing quietly: LoRA training. ACE-Step song generation and FX Lab (Stable Audio Open)
+  each have an experimental Metal path: ACE-Step tries MPS on its own; FX Lab tries it when
+  `AUDIO_FOUNDRY_SAO_MPS=1` is set for the audio service. Results from real Macs are welcome in #41.
 - **The screen agent is Linux-only.** It is an X11 virtual display (Xvfb); on macOS the agent
   tools report that plainly and the rest of the app is unaffected.
 - **Already running ComfyUI Desktop?** Point Guaardvark at it with the port override under
@@ -119,6 +122,7 @@ The file is gitignored and merged over the manifest at load, so the override sur
 - Wrong Python venv (e.g. after upgrade): `rm -rf backend/venv && ./start.sh`
 - Check logs in `logs/`
 - **`extension "vector" is not available`** when indexing: PostgreSQL is installed but pgvector is not. `./start.sh` installs it and enables the extension (needs sudo once); to do it by hand, `sudo apt-get install -y postgresql-<major>-pgvector` then `sudo -u postgres psql -d guaardvark -c "CREATE EXTENSION IF NOT EXISTS vector;"`. If apt cannot find the package on your release, add the [PostgreSQL apt repository](https://www.postgresql.org/download/linux/ubuntu/) first.
+- **You run Ollama yourself and do not want the scripts touching it**: `./start.sh --external-ollama` (persists `GUAARDVARK_OLLAMA_EXTERNAL=1` in `.env`). `start.sh` then only checks that `127.0.0.1:11434` answers, and `stop.sh` leaves it alone. Without that flag, `stop.sh` stops only the Ollama `start.sh` itself launched; `./stop.sh --keep-ollama` (or `GUAARDVARK_OLLAMA_KEEP_RUNNING=1`) keeps even that one, and `./stop.sh --all` restores the full sweep (your own `ollama serve`, the systemd service, a dead port holder). Both switches are also in Settings → Product Profile → Ollama.
 - **Ollama says a model is missing that `ollama list` shows** (WSL2 especially): a hand-started `ollama serve` runs as your user and reads `~/.ollama/models`, while the systemd service runs as `ollama` and reads `/usr/share/ollama/.ollama/models`. Stop the hand-started one and use the service: `sudo systemctl restart ollama`.
 - **`start.sh` says it is "not re-provisioning" PostgreSQL**: your `DATABASE_URL` names a role or database other than the stock `guaardvark`, and the connection failed. The script never resets a role it did not create. Fix the password in `.env`, create the role and database yourself, or run `./start.sh --skip-postgres` for an externally managed database.
 - **Film Crew fails with `model 'gemma4:e4b' not found`**: fixed in 2.8.0 — agents now use whichever Gemma4 tag the installer pulled. On older versions, `ollama pull gemma4:e4b`.

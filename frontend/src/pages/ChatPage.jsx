@@ -701,6 +701,8 @@ const ChatPage = () => {
                 toolCalls: msg.toolCalls ?? msg.extra_data?.steps,
                 agentThinkingSteps: msg.agentThinkingSteps ?? msg.extra_data?.agentThinkingSteps,
                 generatedImages: msg.generatedImages ?? msg.extra_data?.generatedImages,
+                thinking: msg.thinking ?? msg.extra_data?.thinking,
+                truncated: msg.truncated ?? msg.extra_data?.truncated,
                 // Note: these hydrated agentThinkingSteps come from persisted DB extra_data (backend drain on agent complete).
                 // They render via MessageItem + AgentThinkingTrail but are *not* live-streamed steps.
               }));
@@ -764,8 +766,9 @@ const ChatPage = () => {
       const hasTools = (partial.toolCalls?.length || 0) > 0;
       const hasSteps = (partial.agentThinkingSteps?.length || 0) > 0;
       const hasImages = (partial.images?.length || 0) > 0;
+      const hasThinking = !!partial.thinking;
       debugLog('[ChatPage] handleStop salvage: hasSteps=', hasSteps, 'count=', partial.agentThinkingSteps?.length);
-      if (hasContent || hasTools || hasSteps || hasImages) {
+      if (hasContent || hasTools || hasSteps || hasImages || hasThinking) {
         const completedMessage = {
           id: `asst_unified_${Date.now()}_partial`,
           role: "assistant",
@@ -773,6 +776,8 @@ const ChatPage = () => {
           toolCalls: partial.toolCalls || [],
           agentThinkingSteps: partial.agentThinkingSteps || [],
           thinkingText: partial.thinkingText || "",
+          thinking: partial.thinking || "",
+          truncated: partial.truncated === true,
           isUnifiedChat: true,
           timestamp: new Date().toISOString(),
           generatedImages: partial.images || [],
@@ -1346,14 +1351,20 @@ const ChatPage = () => {
       if (fileDetection?.isAgentLoopRequest) {
         shouldContinueWithNormalChat = false;
 
-        const userMsgId = `user_${Date.now()}`;
-        const userMessage = {
-          id: userMsgId,
-          role: "user",
-          content: inputText,
-          timestamp: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, userMessage]);
+        // The optimistic user bubble is already on screen; mark it sent rather
+        // than appending a second copy of the same text.
+        if (userMessageTempId) {
+          setMessages((prev) => prev.map((m) =>
+            m.tempId === userMessageTempId ? { ...m, status: "sent" } : m
+          ));
+        } else {
+          setMessages((prev) => [...prev, {
+            id: `user_${Date.now()}`,
+            role: "user",
+            content: inputText,
+            timestamp: new Date().toISOString(),
+          }]);
+        }
 
         const agentMsgId = `agent_${Date.now()}`;
         setAgentLoopMessageId(agentMsgId);
@@ -1379,7 +1390,10 @@ const ChatPage = () => {
             ? result.result
             : result?.result || result;
 
+          // display_content is what the server persisted for this turn; a
+          // tool_result or file_generation shape carries no final_answer.
           let content =
+            result?.display_content ||
             agentResult?.final_answer ||
             agentResult?.error ||
             result?.error;
@@ -1435,16 +1449,25 @@ const ChatPage = () => {
 
         const continuityMarker = preserveContextDuringFileGeneration(sessionId, inputText, fileDetection);
 
-        const contextPreservationMessage = {
-          id: `context_${Date.now()}`,
-          role: "user",
-          content: inputText,
-          timestamp: new Date().toISOString(),
+        // Tag the optimistic user bubble instead of adding a second one.
+        const continuityFields = {
           contextPreserved: true,
           fileGenerationAttempted: true,
-          continuityMarker: continuityMarker.id
+          continuityMarker: continuityMarker.id,
         };
-        setMessages((prev) => [...prev, contextPreservationMessage]);
+        if (userMessageTempId) {
+          setMessages((prev) => prev.map((m) =>
+            m.tempId === userMessageTempId ? { ...m, ...continuityFields } : m
+          ));
+        } else {
+          setMessages((prev) => [...prev, {
+            id: `context_${Date.now()}`,
+            role: "user",
+            content: inputText,
+            timestamp: new Date().toISOString(),
+            ...continuityFields,
+          }]);
+        }
 
         recordMessage(sessionId, inputText, 'user', {
           fileGenerationTriggered: true,
@@ -2247,7 +2270,7 @@ const ChatPage = () => {
               streamingServiceRef.current = null;
 
               const hasAgentTrail = (result.agentThinkingSteps?.length || 0) > 0;
-              if (result.content || result.generatedImages?.length > 0 || result.toolCalls?.length > 0 || hasAgentTrail) {
+              if (result.content || result.generatedImages?.length > 0 || result.toolCalls?.length > 0 || hasAgentTrail || result.thinking) {
                 debugLog('[ChatPage] APPENDING completed unified message with live agentThinkingSteps.length=', (result.agentThinkingSteps||[]).length, ' (these came from StreamingMessage onThinking appends + ref read on complete)');
                 const completedMessage = {
                   id: `asst_unified_${Date.now()}`,
@@ -2259,6 +2282,8 @@ const ChatPage = () => {
                   generatedImages: result.generatedImages || [],
                   thinkingText: result.thinkingText || "",
                   agentThinkingSteps: result.agentThinkingSteps || [],
+                  thinking: result.thinking || "",
+                  truncated: result.truncated === true,
                   iterations: result.iterations || 0,
                   budget: result.budget || budgetTelemetry,  // Phase 2.1 surface budget telemetry
                 };

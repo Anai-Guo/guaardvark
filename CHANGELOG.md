@@ -4,6 +4,84 @@
 
 Everything the H3 release can do, wired through the product, on a branch until it merges.
 
+- **Thinking is off unless someone asks for it, everywhere the product talks to Ollama.**
+  The Chat page's "Chat thinking" setting was documented as off by default while the stored
+  value said on, so every reply on this box and on a client's box paid for gemma4's hidden reasoning:
+  the same question measured at 1,163 generated tokens and about 40 s for a 554-character
+  answer with thinking on, 183 tokens and about 10 s for an 858-character answer with it off.
+  Outside the Chat page nothing set the flag at all, and a thinking model given a token cap
+  can spend the whole cap reasoning and hand back an empty answer (the agent's narration
+  fallback, an 800-token call, did exactly that). One predicate now decides which models
+  reason, `model_supports_thinking` in `backend/utils/ollama_resource_manager.py`, by name
+  pattern and then by Ollama's own capabilities list, so qwen3 is covered and a family the
+  list has not met is still caught. `build_ollama` turns thinking off for those models unless
+  the caller passes `thinking` itself; `get_llm_instance(model=...)` accepts `thinking`,
+  `request_timeout`, `json_mode`, `num_ctx` and `num_predict` like the RoofBrain build already
+  did; the model-switch and startup instances, the brain's capability probe, the diagnostics
+  ping and the agent's narration fallback all go through the same helper. The Chat page's
+  per-chat `/thinking on` still wins, and the retry after an Ollama serializer crash now keeps
+  that choice instead of silently reasoning again. Retrieved context handed to the chat model
+  is cut on whitespace (`backend/utils/text_cut.py`): a 500-character slice through "4:12"
+  left "4:1" in a prompt and the model repeated it as fact.
+- **The same answer-only default for every direct Ollama call.** The film crew's
+  screenwriting and consensus calls, the character generator, the video, media and music video
+  directors, the animation steering prompt, the video quality review, the H3 prompt polish, the
+  outreach persona and grader, the natural-language control plane, the lesson distiller, image
+  OCR and the music prompt rewriter each built their own request without a `think` field, so a
+  thinking model could spend a 150- or 400-token cap on reasoning and return nothing to parse.
+  Every one of them now spreads `think_payload(model)`, which is `{"think": false}` for a model
+  that reasons and nothing for any other.
+- **Three chat defects seen on camera 2026-09-05.** A thinking model is prompted with
+  `[tool_call]` markup, but the stream only held back the angle-bracket form, so the raw
+  markup typed into the bubble for a second before the parser consumed it; both forms are
+  held back now, and neither reaches saved history. A reply that echoed the tool list
+  (`search_knowledge_base(query:string, top_k:int?)...`) was non-empty, so the empty-answer
+  retry never fired and the echo became the answer; the turn is now repeated once with
+  thinking off and says plainly if the model echoes again. On the legacy agent-loop and
+  file-generation paths the page appended a second user bubble after the optimistic one and
+  read a `final_answer` that `tool_result` and `file_generation` replies never carry, so a
+  finished CSV was reported as "Agent execution completed with no response"; the bubble is
+  reused and the server now returns the `display_content` it already persisted.
+- **Chat retrieval had been failing on every turn.** The hybrid retriever ran its vector and
+  keyword legs through a nested event loop; inside a request thread the first call died with
+  "Detected nested async" and every later one with asyncpg's "another operation is in
+  progress", so the model answered from memory and told people nothing was indexed while 18
+  documents were. The two legs now run in sequence on the store's synchronous engine
+  (`use_async=False` in `backend/services/indexing_service.py`); a question about the indexed
+  README comes back citing it.
+- **One active video model for every pipeline.** Chat `/video`, `videos generate` in the CLI,
+  batch requests that omit a model, the music video and Film Crew all pick their model through
+  one resolver: an explicit id, else a per-pipeline override, else the global setting at
+  `/api/settings/active_video_model`, else the largest installed model the card can hold. An id
+  that cannot run is refused in one sentence; families are never swapped silently. Omitted fps,
+  frames, steps and canvas fill from the model's declared native values, so the CogVideoX
+  low-VRAM path no longer cuts steps below the model's floor. Note: where the music video and
+  Film Crew editor used to hard-code Wan 2.2 14B I2V, the default now follows the registry,
+  which has been Wan 2.2 5B TI2V since July; pick 14B in the picker or the setting to keep it.
+- **Music video and Film Crew start from chat, the CLI and MCP.** "Make a music video from
+  song.mp3, neon noir" and "film this script …" create the project and start analysis or the
+  screenwriter, then stop at the Studio gate: nothing is approved and no GPU render starts
+  outside Studio. A song path or script path given to those tools must sit under the uploads or
+  outputs directory or the install root. Frame counts snap to each model's declared grid,
+  MiniMax's 17k+5 included.
+- **Paths from a request stay inside the directory they belong to.** One helper,
+  `backend/utils/path_guard.py`, joins caller-supplied names under a server-chosen root and
+  refuses anything that lands outside it; forty call sites (batch video, files, backups,
+  outputs, jobs, uploads, the interconnector, the swarm and video-editor sidecars) now go
+  through it instead of their own `resolve()`/`startswith` checks. Vector-store table names
+  are quoted through psycopg2's `Identifier`, the self-test category is allow-listed before
+  it reaches a subprocess, Audio Foundry proxy replies are always JSON, and the system map
+  and `/build` accept roots inside the running codebase or the uploads directory only.
+  Closes the 280 open code-scanning alerts except the 21 that describe operator-directed
+  browsing of the server's own filesystem, which are dismissed with reasons.
+- **GPU faults are reported as GPU faults.** A CUDA error that kills the context (launch
+  timeout, illegal memory access, device-side assert, uncorrectable ECC and kin) is now
+  recognised in one place. The backend records it, refuses further GPU work immediately
+  instead of retrying it, fails the rest of a running batch without trying each prompt, and
+  tells the user the backend needs a restart. Before this, one driver watchdog reset left
+  every later image request failing for hours with "pipeline failed to load — usually VRAM
+  pressure or an incomplete download". Status reports the fault under `gpu_fault`.
+
 - **Capability contract.** Every video model entry can declare modes (text, first frame,
   last frame, first+last, reference), audio in and out, whether it samples with CFG, its
   frame rule and rate, clip bounds, a step floor and default, speed profiles, style
@@ -20,7 +98,7 @@ Everything the H3 release can do, wired through the product, on a branch until i
   into the model's format (numbered shots with cut times that add up to the clip, speaker
   ids, tagged dialogue in the model card's eleven languages), with an optional polish pass
   by the local director model that is discarded if it touches the dialogue. Eight authored
-  prompt presets ship in `backend/prompt_bundles/minimax_h3`.
+  prompt presets ship in `plugins/comfyui/scripts/prompt_bundles/minimax_h3`.
 - **Film Crew on H3.** A production can name its video model; on a native-audio model each
   scene renders as windows of at most fifteen seconds with the cast's lines spoken by the
   model, joined on the storyboard stills, no voiceover laid over them, the score mixed
@@ -53,6 +131,24 @@ Everything the H3 release can do, wired through the product, on a branch until i
   performance track: a 4 s narration anchored at frame 0 came back in the clip's
   soundtrack with a 0.91 waveform correlation (0.99 on the envelope), rendered in 138 s
   on the turbo profile.
+
+## Unreleased — CLI
+
+The `guaardvark` command is now a peer of the web UI, not a subset.
+
+- **One command catalog.** Slash router, tab completion, `/help`, and the contract tests
+  share `COMMAND_TREE`. `/imagine`, `/video`, `/voice`, `/ingest`, `/agent`, `/web`,
+  `/load`, `/skills`, and `recipes` complete. Unknown commands get “Did you mean…?”.
+  Completion works without a leading `/`.
+- **Theme-true prompt.** REPL colors follow `/theme` (including `day` and `auto`). Compact
+  banner on short terminals so the 30-row aardvark art does not overflow. Chat prefix is
+  the brand mark, not a llama. `/clear` uses Rich. Config lives in `~/.guaardvark/cli.json`
+  (legacy `~/.llx` still read). `/web` uses the real frontend port from runtime.json.
+- **Studio commands.** `plugins`, `gpu`, `mcp`, `audio`, `swarm`, `lessons` wrap the
+  existing APIs. `guaardvark completion bash|zsh|fish` prints a shell script.
+  `guaardvark doctor --cli` reports terminal graphics / tmux passthrough.
+- **Show the artifact.** `/imagine` previews inline (Kitty / iTerm / chafa). `/voice`
+  plays locally. `/agent shot` dumps the agent desktop. Jobs notify on complete.
 
 ## 2.8.1 — Profiles, extensions, and a bootstrap that converges offline
 

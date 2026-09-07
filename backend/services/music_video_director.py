@@ -366,6 +366,7 @@ def _director_chat(*, ollama, model: str, system: str, user: str, batch_len: int
     keys stay authoritative — see ``_director_options``.
     ``num_ctx`` (optional) is the orchestrator-computed context window for this model run."""
     import time
+    from backend.utils.ollama_resource_manager import think_payload
     opts = _director_options(batch_len, rich=rich, sampling=sampling, num_ctx_override=num_ctx)
     resp = None
     for attempt in range(3):
@@ -378,6 +379,7 @@ def _director_chat(*, ollama, model: str, system: str, user: str, batch_len: int
                     {"role": "user", "content": user},
                 ],
                 options=opts,
+                **think_payload(model),
             )
             break
         except Exception as e:  # connection, server busy, etc.

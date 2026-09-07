@@ -192,11 +192,13 @@ class ImageContentExtractor:
                 num_ctx = 4096
 
             with open(image_path, 'rb') as image_file:
+                from backend.utils.ollama_resource_manager import think_payload
                 response = client.generate(
                     model=model_name,
                     prompt=OCR_PROMPT,
                     images=[image_file.read()],
-                    options={"num_ctx": num_ctx}
+                    options={"num_ctx": num_ctx},
+                    **think_payload(model_name),
                 )
             
             extracted_text = response.get('response', '').strip()
@@ -290,6 +292,7 @@ class ImageContentExtractor:
             num_ctx = resolve_num_ctx(model_name)
         except Exception:
             num_ctx = 4096
+        from backend.utils.ollama_resource_manager import think_payload
         try:
             response = requests.post(
                 f"{OLLAMA_BASE_URL}/api/generate",
@@ -299,6 +302,7 @@ class ImageContentExtractor:
                     "images": [encoded_image],
                     "stream": False,
                     "options": {"num_ctx": num_ctx},
+                    **think_payload(model_name),
                 },
                 timeout=LLM_REQUEST_TIMEOUT,
             )

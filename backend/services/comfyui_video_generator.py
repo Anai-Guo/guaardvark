@@ -2547,21 +2547,29 @@ class Wan22I2VGenerator:
     inside generate_video. Short clips keep identity stable and VRAM in budget on 16 GB.
     """
 
-    def __init__(self, fps: int = 24):
-        self.fps = fps
+    def __init__(self, model: str = "wan22-5b", fps: int | None = None):
+        from backend.services.video_model_registry import model_capabilities
+        self.model = model
+        caps = model_capabilities(model)
+        self.fps = int(fps if fps is not None else (caps.get("native_fps") or 24))
 
     def i2v_from_image(
         self, *, image_path: str, prompt: str, loras: list[str],
         duration_seconds: float, output_path: str,
     ) -> str:
-        # Clamp to a short clip — long Wan I2V drifts the face and blows 16 GB.
-        # generate_video handles Wan's "frames % 8 == 1" alignment internally.
-        frames = max(17, min(49, int(round(duration_seconds * self.fps)) or 25))
+        # Clamp to a short clip — long I2V drifts the face and blows 16 GB.
+        # Snap to the model's declared frame rule (Wan/Hunyuan 4n+1, LTX 8n+1).
+        from backend.services.video_model_registry import snap_frames
+        raw = max(17, min(49, int(round(duration_seconds * self.fps)) or 25))
+        frames = snap_frames(self.model, raw)
+        if frames < 17:
+            # Snapping down left too short a clip; take the next grid point up.
+            frames = snap_frames(self.model, 17, up=True)
         out_dir = Path(output_path).parent
         out_dir.mkdir(parents=True, exist_ok=True)
         gen = get_video_generator()
         req = VideoGenerationRequest(
-            model="wan22-14b-i2v",
+            model=self.model,
             prompt=prompt or "",
             duration_frames=frames,
             fps=self.fps,

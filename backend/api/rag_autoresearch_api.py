@@ -79,8 +79,30 @@ def get_config():
     return jsonify(config)
 
 
+# Settings rows the Settings page edits (proposer, judge, window, auto-start
+# and the older rag_autoresearch_* knobs). GET /settings fills defaults for any
+# key that has no row, so resetting means deleting the rows.
+AUTORESEARCH_SETTING_KEYS = (
+    "rag_autoresearch_idle_minutes",
+    "rag_autoresearch_auto_enabled",
+    "rag_autoresearch_max_experiments",
+    "rag_autoresearch_phase_limit",
+    "rag_autoresearch_judge_model",
+    "autoresearch_proposer_model",
+    "autoresearch_judge_model",
+    "autoresearch_nightly_window",
+)
+
+
 @autoresearch_bp.route("/config/reset", methods=["POST"])
 def reset_config():
+    """Reset everything the Settings page calls "autoresearch" to defaults.
+
+    Two stores are involved: the experiment config file (tuned params, baseline
+    score, phase progress) and the Setting rows behind the fields on the page.
+    Resetting only the file left the visible fields unchanged, so the button
+    appeared to do nothing while it had discarded the learned baseline.
+    """
     from backend.config import AUTORESEARCH_DEFAULT_PARAMS
     svc = get_autoresearch_service()
     config = {
@@ -91,7 +113,11 @@ def reset_config():
         "phase_plateau_count": 0,
     }
     svc._save_config(config)
-    return jsonify({"status": "reset", "config": config})
+    removed = Setting.query.filter(Setting.key.in_(AUTORESEARCH_SETTING_KEYS)).delete(
+        synchronize_session=False
+    )
+    db.session.commit()
+    return jsonify({"status": "reset", "config": config, "settings_reset": int(removed or 0)})
 
 
 @autoresearch_bp.route("/eval-pairs", methods=["GET"])

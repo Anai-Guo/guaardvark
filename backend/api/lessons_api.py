@@ -143,6 +143,7 @@ def _distill_lesson_pearls(app, lesson_id: str, session_id: str) -> dict | None:
             )
 
             raw = ""
+            from backend.utils.ollama_resource_manager import think_payload
             try:
                 resp = requests.post(
                     f"{OLLAMA_BASE_URL}/api/generate",
@@ -151,6 +152,7 @@ def _distill_lesson_pearls(app, lesson_id: str, session_id: str) -> dict | None:
                         "prompt": prompt,
                         "stream": False,
                         "options": {"num_predict": 1024, "temperature": 0.3},
+                        **think_payload(active_model),
                     },
                     timeout=120,
                 )

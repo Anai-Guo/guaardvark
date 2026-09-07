@@ -18,6 +18,20 @@ def get_chat_image_model() -> str:
     return get_setting("chat_image_model", default="auto") or "auto"
 
 
+def get_active_video_model() -> str:
+    """Persisted global video model id, or empty to use hardware fallback."""
+    return (get_setting("active_video_model", default="") or "").strip()
+
+
+def get_active_video_model_overrides() -> dict:
+    """Optional per-role / per-pipeline video model overrides (empty = inherit)."""
+    return {
+        "i2v": (get_setting("active_video_model_i2v", default="") or "").strip(),
+        "music_video": (get_setting("active_video_model_music_video", default="") or "").strip(),
+        "film_crew": (get_setting("active_video_model_film_crew", default="") or "").strip(),
+    }
+
+
 def get_web_access() -> bool:
     """Return True if allow_web_search setting is enabled."""
     if not db or not Setting:
@@ -94,7 +108,6 @@ SYSTEM_SETTING_KEYS = {
 ENV_VAR_MAP = {
     "enhanced_context_enabled": "GUAARDVARK_ENHANCED_CONTEXT",
     "advanced_rag_enabled": "GUAARDVARK_ADVANCED_RAG",
-    "rag_debug_enabled": "GUAARDVARK_RAG_DEBUG",
     "claude_escalation_mode": "GUAARDVARK_CLAUDE_ESCALATION_MODE",
     "claude_monthly_budget": "GUAARDVARK_CLAUDE_TOKEN_BUDGET",
     "vision_pipeline_enabled": "GUAARDVARK_VISION_PIPELINE",

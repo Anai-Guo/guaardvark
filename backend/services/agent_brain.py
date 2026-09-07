@@ -679,11 +679,14 @@ class AgentBrain:
             user_prompt += f"Last thing visible on screen: {last_scene}\n"
         user_prompt += "\nReply to me now."
 
-        # Gemma4 spends 100+ tokens on internal reasoning before emitting visible
-        # content. Buffer the full response, strip <think> blocks, then emit —
-        # streaming each token live would leak the reasoning to the user.
+        # Thinking is off for this call: a thinking model reasons in Ollama's
+        # separate ``message.thinking`` field, which the loop below never reads,
+        # and with an 800-token cap the whole budget can go there and leave the
+        # narration empty. Buffer the full response, strip any inline <think>
+        # block, then emit; streaming each token live would leak reasoning.
         # Two attempts: right after a vision-heavy action loop, Ollama occasionally
         # returns a zero-chunk stream on the first call. A second try resolves it.
+        from backend.utils.ollama_resource_manager import think_payload
         client = ollama.Client(
             timeout=_httpx.Timeout(connect=5.0, read=25.0, write=25.0, pool=25.0),
         )
@@ -701,6 +704,7 @@ class AgentBrain:
                     stream=True,
                     keep_alive="10m",
                     options={"num_ctx": 4096, "num_predict": 800, "temperature": 0.6},
+                    **think_payload(self.state.active_model),
                 )
                 for chunk in stream:
                     if is_aborted(session_id):

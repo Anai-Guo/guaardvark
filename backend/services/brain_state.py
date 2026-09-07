@@ -406,6 +406,7 @@ class BrainState:
         from backend.utils.llm_service import get_default_llm
         from backend.utils.ollama_resource_manager import (
             is_vision_model,
+            model_supports_thinking,
             model_supports_tools,
         )
 
@@ -413,14 +414,10 @@ class BrainState:
         model_name = getattr(self.llm, "model", "unknown")
         self.active_model = model_name
 
-        # Thinking model detection (matches unified_chat_engine.py patterns)
-        thinking_patterns = ["deepseek-r1", "thinking", "gemma4", "gemma-4"]
-        is_thinking = any(p in model_name.lower() for p in thinking_patterns)
-
         self.model_caps = ModelCapabilities(
             name=model_name,
             supports_native_tools=model_supports_tools(model_name),
-            is_thinking_model=is_thinking,
+            is_thinking_model=model_supports_thinking(model_name),
             is_vision_model=is_vision_model(model_name),
             context_window=getattr(self.llm, "context_window", 8192),
         )

@@ -38,6 +38,7 @@ fi
 REQUESTED_PROFILE=""
 EXPECT_PROFILE=0
 VOICE_FLAG_GIVEN=0
+EXTERNAL_OLLAMA_FLAG=0
 for arg in "$@"; do
   if [ "$EXPECT_PROFILE" = 1 ]; then
     REQUESTED_PROFILE="$arg"; EXPECT_PROFILE=0; continue
@@ -60,6 +61,8 @@ for arg in "$@"; do
       echo "  --no-auto-build    Disable automatic frontend rebuild"
       echo "  --skip-migrations  Skip database migration checks"
       echo "  --skip-postgres    Skip PostgreSQL setup (for external DB users)"
+      echo "  --external-ollama  Use an Ollama you run yourself: never start it, never stop it"
+      echo "                     (persisted as GUAARDVARK_OLLAMA_EXTERNAL=1 in .env)"
       echo "  --app-mode         Launch browser on startup"
       echo "  --no-browser       Do not launch browser"
       echo "  --discord          Also start the Discord bot plugin"
@@ -70,6 +73,7 @@ for arg in "$@"; do
       exit 0
       ;;
     --fast) FAST_START=1 ;;
+    --external-ollama) EXTERNAL_OLLAMA_FLAG=1 ;;
     --test) TEST_MODE=1 ;;
     --no-voice) VOICE_CHECK=0; VOICE_FLAG_GIVEN=1 ;;
     --profile) EXPECT_PROFILE=1 ;;
@@ -245,6 +249,15 @@ if [ -n "$REQUESTED_PROFILE" ]; then
   fi
   export GUAARDVARK_PROFILE="$REQUESTED_PROFILE"
 fi
+if [ "$EXTERNAL_OLLAMA_FLAG" = 1 ]; then
+  touch "$SCRIPT_DIR/.env"
+  if grep -q '^GUAARDVARK_OLLAMA_EXTERNAL=' "$SCRIPT_DIR/.env"; then
+    sed -i.bak "s/^GUAARDVARK_OLLAMA_EXTERNAL=.*/GUAARDVARK_OLLAMA_EXTERNAL=1/" "$SCRIPT_DIR/.env" && rm -f "$SCRIPT_DIR/.env.bak"
+  else
+    echo "GUAARDVARK_OLLAMA_EXTERNAL=1" >> "$SCRIPT_DIR/.env"
+  fi
+  export GUAARDVARK_OLLAMA_EXTERNAL=1
+fi
 _PROFILE_EXPORTS="$("$PYTHON_CMD" "$SCRIPT_DIR/backend/profiles/__main__.py" export --shell 2>"$SCRIPT_DIR/.start_cache/profile.err" || true)"
 if [ -n "$_PROFILE_EXPORTS" ]; then
   eval "$_PROFILE_EXPORTS"
@@ -255,6 +268,19 @@ fi
 # startup skips the profile asks for, unless the flag was passed explicitly
 if [ "$VOICE_FLAG_GIVEN" = 0 ] && [ "${GUAARDVARK_PROFILE_VOICE_CHECK:-1}" = "0" ]; then
   VOICE_CHECK=0
+fi
+
+# ─── Backend port ─────────────────────────────────────────────────────────────
+# macOS reserves 5000 for the AirPlay Receiver (Monterey and later), so the default
+# there is 5055. An explicit FLASK_PORT (environment or .env) always wins. The chosen
+# default is written to .env so the backend, Vite and the CLI agree on every start.
+if [ -z "${FLASK_PORT:-}" ] && is_macos; then
+  FLASK_PORT=5055
+  touch "$SCRIPT_DIR/.env"
+  if ! grep -q '^FLASK_PORT=' "$SCRIPT_DIR/.env"; then
+    echo "FLASK_PORT=$FLASK_PORT" >> "$SCRIPT_DIR/.env"
+  fi
+  export FLASK_PORT
 fi
 
 # Generate SECRET_KEY if not set — prevents "Using default SECRET_KEY" warning.
@@ -1416,13 +1442,13 @@ ensure_backend_python_environment() {
             fi
         fi
 
-        # Optional CV/face-restoration extra (P3-10) — OPT-IN ONLY. These deps
-        # (gfpgan/realesrgan/basicsr/facexlib/controlnet-aux/mediapipe) are a
-        # multi-hundred-MB stack that lacks reliable aarch64 wheels, and the
-        # earlier auto-install on any GPU box made every fresh install pay for
-        # two optional features. Both consumers import lazily inside try/except
-        # and degrade gracefully when absent (restoration_available=False /
-        # controlnet_available=False), so skipping costs nothing at boot.
+        # Optional face-restoration extra (P3-10) — OPT-IN ONLY. These deps
+        # (gfpgan/realesrgan/basicsr/facexlib) are a multi-hundred-MB stack
+        # that lacks reliable aarch64 wheels, and the earlier auto-install on
+        # any GPU box made every fresh install pay for an optional feature. The
+        # consumer imports lazily inside try/except and degrades gracefully
+        # when absent (restoration_available=False), so skipping costs nothing
+        # at boot.
         # Failure here WARNS but never fails the core install.
         if [ -f "$BACKEND_DIR/requirements-cv.txt" ]; then
             if [ "${GUAARDVARK_INSTALL_CV:-0}" = "1" ]; then
@@ -2071,7 +2097,18 @@ fi
 OLLAMA_PLUGIN_JSON="$SCRIPT_DIR/plugins/ollama/plugin.json"
 OLLAMA_ENABLED=$(plugin_effective_enabled "ollama" "$OLLAMA_PLUGIN_JSON")
 
-if [ "$OLLAMA_AVAILABLE" -eq 1 ] && [ "$OLLAMA_ENABLED" != "False" ]; then
+if [ "${GUAARDVARK_OLLAMA_EXTERNAL:-0}" = 1 ] && [ "$OLLAMA_ENABLED" != "False" ]; then
+    # External Ollama: the user runs it; start.sh only checks that it answers.
+    if curl -sf --max-time 3 http://127.0.0.1:11434/ >/dev/null 2>&1; then
+        vader_success "Using external Ollama on 127.0.0.1:11434 (GUAARDVARK_OLLAMA_EXTERNAL=1; never started or stopped by these scripts)"
+    elif [ "${GUAARDVARK_OLLAMA_OPTIONAL:-0}" = "1" ]; then
+        vader_warn "External Ollama is not answering on 127.0.0.1:11434 — continuing because GUAARDVARK_OLLAMA_OPTIONAL=1."
+    else
+        vader_error "GUAARDVARK_OLLAMA_EXTERNAL=1 but nothing answers on 127.0.0.1:11434. Start your Ollama (ollama serve) and re-run ./start.sh,"
+        vader_error "or remove GUAARDVARK_OLLAMA_EXTERNAL from .env to let start.sh manage it."
+        exit 1
+    fi
+elif [ "$OLLAMA_AVAILABLE" -eq 1 ] && [ "$OLLAMA_ENABLED" != "False" ]; then
     # Step 1: Check if already running
     if curl -sf --max-time 3 http://127.0.0.1:11434/ >/dev/null 2>&1; then
         vader_success "Ollama service is already active"
@@ -2657,7 +2694,7 @@ elif { command_exists ss && ss -tlpn 2>/dev/null | grep -q ":$FLASK_PORT\b"; } \
     # macOS and the backend just dies on bind with a cryptic "Address already in use").
     if [ "$(uname -s)" = "Darwin" ] && [ "$FLASK_PORT" = "5000" ]; then
         vader_error "Port 5000 is in use — on macOS this is almost always the 'AirPlay Receiver' (System Settings → General → AirDrop & Handoff → AirPlay Receiver)."
-        vader_error "Either turn AirPlay Receiver off, or keep it on and set a different backend port: add 'FLASK_PORT=5055' to your .env, then re-run ./start.sh."
+        vader_error "The macOS default is 5055; this run asked for 5000 explicitly. Remove FLASK_PORT=5000 from .env (or set another port there), or turn AirPlay Receiver off, then re-run ./start.sh."
     else
         vader_error "Port $FLASK_PORT is in use by a non-Guaardvark process that does not respond to /api/health. Free it or set FLASK_PORT, then retry."
     fi

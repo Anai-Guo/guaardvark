@@ -67,7 +67,13 @@ function formatRelative(iso) {
   return `${Math.floor(diffSec / 86400)}d ago`;
 }
 
+import { useSnackbar } from "../common/SnackbarProvider";
+import { ConfirmActionDialog } from "./ui";
+
 export default function FixesModal({ open, onClose, showMessage }) {
+  const snackbar = useSnackbar();
+  // Pending "apply" targets awaiting confirmation; null when the dialog is closed.
+  const [confirmApply, setConfirmApply] = useState(null);
   const [fixes, setFixes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -114,7 +120,8 @@ export default function FixesModal({ open, onClose, showMessage }) {
   );
 
   const notify = (msg, sev = "success") => {
-    if (showMessage) showMessage(msg, sev);
+    const emit = showMessage || snackbar?.showMessage;
+    if (emit) emit(msg, sev);
   };
 
   const ACTIONS = {
@@ -159,7 +166,7 @@ export default function FixesModal({ open, onClose, showMessage }) {
 
   const handleApprove = (fix) => runAction("approve", fix);
   const handleReject = (fix) => runAction("reject", fix);
-  const handleApply = (fix) => runAction("apply", fix);
+  const handleApply = (fix) => setConfirmApply([fix]);
 
   const proposedFixes = useMemo(
     () => fixes.filter((f) => f.status === "proposed" || f.status === "triaged"),
@@ -408,7 +415,7 @@ export default function FixesModal({ open, onClose, showMessage }) {
               color="success"
               startIcon={<PlayIcon />}
               disabled={actionBusy}
-              onClick={() => runAction("apply", approvedFixes)}
+              onClick={() => setConfirmApply(approvedFixes)}
             >
               Apply all ({approvedFixes.length})
             </Button>
@@ -453,6 +460,20 @@ export default function FixesModal({ open, onClose, showMessage }) {
           <Button size="small" onClick={onClose}>Close</Button>
         </Stack>
       </DialogActions>
+      <ConfirmActionDialog
+        open={confirmApply !== null}
+        onClose={() => setConfirmApply(null)}
+        onConfirm={() => {
+          const targets = confirmApply;
+          setConfirmApply(null);
+          runAction("apply", targets);
+        }}
+        title={confirmApply && confirmApply.length > 1 ? `Apply ${confirmApply.length} fixes to the filesystem` : "Apply this fix to the filesystem"}
+        description="Rewrites the source files named in the fix. A backup copy of each file is kept on disk, but there is no restore button; reverting means restoring that copy by hand or from git."
+        facts={(confirmApply || []).slice(0, 8).map((f) => ({ label: `#${f.id}`, value: f.file_path || "" }))}
+        keeps="every file the fix does not name."
+        confirmLabel={confirmApply && confirmApply.length > 1 ? "Apply all" : "Apply"}
+      />
     </Dialog>
   );
 }

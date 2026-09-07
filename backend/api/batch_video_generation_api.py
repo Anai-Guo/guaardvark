@@ -20,6 +20,7 @@ from flask import Blueprint, request, send_file
 from werkzeug.utils import secure_filename
 
 from backend.utils.response_utils import success_response, error_response
+from backend.utils.path_guard import PathEscapesRoot, contained
 from backend.services.batch_video_generator import get_batch_video_generator
 # Single source of truth for video-model file layout (download dst == install
 # check == ComfyUI loader paths). See backend/services/video_model_registry.py.
@@ -31,6 +32,8 @@ from backend.services.video_model_registry import (
     classify_hf_download_error,
     model_capabilities,
     tier_defaults_for,
+    resolve_active_video_model,
+    clip_defaults_for,
 )
 
 # GPU Resource Coordinator for pre-flight availability check
@@ -115,6 +118,35 @@ def _parse_int(value):
         return None
 
 
+def _resolve_request_model(data, role: str):
+    """Explicit body model, else the active-video-model resolver."""
+    explicit = (data.get("model") or "").strip() or None
+    model_id, err = resolve_active_video_model(role, explicit)
+    if err:
+        return None, err
+    return model_id, None
+
+
+def _clip_params(data, model_id: str) -> dict:
+    """Fill omitted fps/frames/steps/canvas from the model's native defaults."""
+    defaults = clip_defaults_for(model_id)
+    def _num(key, fallback):
+        raw = data.get(key)
+        if raw in (None, ""):
+            return fallback
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return fallback
+    return {
+        "duration_frames": _num("duration_frames", defaults["duration_frames"]),
+        "fps": _num("fps", defaults["fps"]),
+        "width": _num("width", defaults["width"]),
+        "height": _num("height", defaults["height"]),
+        "num_inference_steps": _num("num_inference_steps", defaults["num_inference_steps"]),
+    }
+
+
 @batch_video_bp.route("/generate/text", methods=["POST"])
 def generate_text_to_video_batch():
     """
@@ -138,22 +170,25 @@ def generate_text_to_video_batch():
         if not prompts:
             return error_response("No prompts provided", 400)
 
-        model_id = data.get("model", DEFAULT_T2V_MODEL)
+        model_id, resolve_err = _resolve_request_model(data, "t2v")
+        if resolve_err:
+            return error_response(resolve_err, 400)
         ready, preflight_err = preflight_video_model(model_id)
         if not ready:
             return error_response(preflight_err, 400)
         # Per-prompt guides (audio or image anchors) on models that declare
         # audio_in: a list per prompt of {"kind", "path", "frame_idx", ...}.
         guides = data.get("guides") if isinstance(data.get("guides"), list) else []
+        clip = _clip_params(data, model_id)
 
         params = {
             "model": model_id,
-            "duration_frames": int(data.get("duration_frames", 49)),
-            "fps": int(data.get("fps", 24)),
-            "width": int(data.get("width", 512)),
-            "height": int(data.get("height", 512)),
+            "duration_frames": clip["duration_frames"],
+            "fps": clip["fps"],
+            "width": clip["width"],
+            "height": clip["height"],
             "motion_strength": float(data.get("motion_strength", 1.0)),
-            "num_inference_steps": int(data.get("num_inference_steps", 25)),
+            "num_inference_steps": clip["num_inference_steps"],
             "guidance_scale": float(data.get("guidance_scale", 7.5)),
             "seed": _parse_int(data.get("seed")),
             "generate_frames_only": str(data.get("generate_frames_only", "false")).lower() == "true",
@@ -230,20 +265,23 @@ def generate_image_to_video_batch():
         last_frame_paths = _parse_list(data.get("last_frame_paths"))
         guides = data.get("guides") if isinstance(data.get("guides"), list) else []
 
-        model_id = data.get("model", DEFAULT_I2V_MODEL)
+        model_id, resolve_err = _resolve_request_model(data, "i2v")
+        if resolve_err:
+            return error_response(resolve_err, 400)
         ready, preflight_err = preflight_video_model(model_id)
         if not ready:
             return error_response(preflight_err, 400)
+        clip = _clip_params(data, model_id)
 
         params = {
             "prompt": data.get("prompt", ""),
             "model": model_id,
-            "duration_frames": int(data.get("duration_frames", 49)),
-            "fps": int(data.get("fps", 24)),
-            "width": int(data.get("width", 512)),
-            "height": int(data.get("height", 512)),
+            "duration_frames": clip["duration_frames"],
+            "fps": clip["fps"],
+            "width": clip["width"],
+            "height": clip["height"],
             "motion_strength": float(data.get("motion_strength", 1.0)),
-            "num_inference_steps": int(data.get("num_inference_steps", 25)),
+            "num_inference_steps": clip["num_inference_steps"],
             "guidance_scale": float(data.get("guidance_scale", 7.5)),
             "seed": _parse_int(data.get("seed")),
             "generate_frames_only": str(data.get("generate_frames_only", "false")).lower() == "true",
@@ -443,11 +481,10 @@ def list_batches():
 def get_video(batch_id: str, video_name: str):
     try:
         generator = get_batch_video_generator()
-        batch_dir = Path(generator.base_output_dir) / batch_id
-        video_path = (batch_dir / video_name).resolve()
         try:
-            video_path.relative_to(batch_dir)
-        except ValueError:
+            batch_dir = contained(generator.base_output_dir, batch_id)
+            video_path = contained(batch_dir, video_name)
+        except PathEscapesRoot:
             return error_response("Invalid video path", 400)
 
         if not video_path.exists():
@@ -475,11 +512,10 @@ def get_video(batch_id: str, video_name: str):
 def delete_video(batch_id: str, video_name: str):
     try:
         generator = get_batch_video_generator()
-        batch_dir = Path(generator.base_output_dir) / batch_id
-        target_path = (batch_dir / video_name).resolve()
         try:
-            target_path.relative_to(batch_dir)
-        except ValueError:
+            batch_dir = contained(generator.base_output_dir, batch_id)
+            target_path = contained(batch_dir, video_name)
+        except PathEscapesRoot:
             return error_response("Invalid video path", 400)
 
         if not target_path.exists():
@@ -520,11 +556,10 @@ def rename_video(batch_id: str, video_name: str):
             return error_response("New name cannot be empty", 400)
 
         generator = get_batch_video_generator()
-        batch_dir = Path(generator.base_output_dir) / batch_id
-        src_path = (batch_dir / video_name).resolve()
         try:
-            src_path.relative_to(batch_dir)
-        except ValueError:
+            batch_dir = contained(generator.base_output_dir, batch_id)
+            src_path = contained(batch_dir, video_name)
+        except PathEscapesRoot:
             return error_response("Invalid video path", 400)
 
         if not src_path.exists():
@@ -689,7 +724,10 @@ def rename_batch(batch_id: str):
 def download_batch(batch_id: str):
     try:
         generator = get_batch_video_generator()
-        batch_dir = Path(generator.base_output_dir) / batch_id
+        try:
+            batch_dir = contained(generator.base_output_dir, batch_id)
+        except PathEscapesRoot:
+            return error_response("Batch not found", 404)
         if not batch_dir.exists():
             return error_response("Batch not found", 404)
 
@@ -888,6 +926,8 @@ def list_video_models():
     try:
         models = []
         total_vram_mb = _detected_total_vram_mb()
+        active_t2v, _ = resolve_active_video_model("t2v")
+        active_i2v, _ = resolve_active_video_model("i2v")
         for model_id, info in VIDEO_MODEL_REGISTRY.items():
             plan = _resolve_download_plan(model_id)
             requires = info.get("requires", [])
@@ -924,8 +964,9 @@ def list_video_models():
                 "license": info.get("license"),
                 # LoRA companions name the generation entries they apply to.
                 "applies_to": info.get("applies_to", []),
+                "active": model_id in {active_t2v, active_i2v} and bool(model_id),
             })
-        return success_response({"models": models})
+        return success_response({"models": models, "active_t2v": active_t2v, "active_i2v": active_i2v})
     except Exception as e:
         logger.error(f"Error listing video models: {e}")
         return error_response(str(e), 500)
@@ -933,7 +974,7 @@ def list_video_models():
 
 @batch_video_bp.route("/prompt-presets", methods=["GET"])
 def list_prompt_presets():
-    """Prompt presets for a model family, read from backend/prompt_bundles.
+    """Prompt presets for a model family, read from plugins/comfyui/scripts/prompt_bundles.
 
     Each preset carries its structured intent and the prompt the compiler
     renders from it, plus format hints (duration, ratio, mode). The community

@@ -67,7 +67,10 @@ const parseLesson = (memory) => {
   }
 };
 
-const MemoryManagementSection = () => {
+// `title`/`icon` default to the section heading the Settings page expects.
+// AgentMemoryPage renders this under a PageLayout header that already says
+// "Agent Memory", and passes title={null} so the name isn't printed twice.
+const MemoryManagementSection = ({ title = "Agent Memory", icon = <MemoryIcon /> }) => {
   const [memories, setMemories] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -302,7 +305,7 @@ const MemoryManagementSection = () => {
   };
 
   return (
-    <SettingsSection title="Agent Memory" icon={<MemoryIcon />}>
+    <SettingsSection title={title} icon={icon}>
       <Typography variant="body2" color="text.secondary" paragraph>
         Manage the long-term memories, facts, and preferences the agent has learned about you. The agent uses these to personalize its responses.
       </Typography>
@@ -460,6 +463,11 @@ const MemoryManagementSection = () => {
                       </Box>
                     </TableCell>
                     <TableCell align="right" onClick={(e) => e.stopPropagation()}>
+                      {memory.status !== "active" && (
+                        <Button size="small" color="success" onClick={() => handleStatusChange(memory, "active")}>
+                          Restore
+                        </Button>
+                      )}
                       <Button
                         size="small"
                         onClick={() => handleStatusChange(memory, "archived")}

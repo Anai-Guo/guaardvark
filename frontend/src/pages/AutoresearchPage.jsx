@@ -27,6 +27,7 @@ import {
   Tooltip,
   Switch,
 } from "@mui/material";
+import { alpha } from "@mui/material/styles";
 import {
   Science as ScienceIcon,
   Refresh as RefreshIcon,
@@ -35,6 +36,8 @@ import {
   CheckCircle as ActivateIcon,
   NightsStay as NightIcon,
   Stop as StopIcon,
+  Check as SavedIcon,
+  DeleteSweep as ResetDefaultsIcon,
 } from "@mui/icons-material";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -64,6 +67,29 @@ const formatDate = (iso) => {
 
 const formatScore = (v) =>
   typeof v === "number" ? v.toFixed(3) : "—";
+
+const AUTO_START_ID = "autoresearch-auto-start";
+
+const SETTING_FIELDS = [
+  {
+    key: "autoresearch_proposer_model",
+    label: "Proposer model",
+    placeholder: "(active model)",
+    width: 200,
+  },
+  {
+    key: "autoresearch_judge_model",
+    label: "Judge model",
+    placeholder: "(active model)",
+    width: 200,
+  },
+  {
+    key: "autoresearch_nightly_window",
+    label: "Nightly window",
+    placeholder: "01:00-06:00",
+    width: 170,
+  },
+];
 
 const ScoreSparkline = ({ points }) => {
   const vals = (points || []).filter((v) => typeof v === "number");
@@ -99,6 +125,11 @@ const AutoresearchPage = () => {
   const [stopping, setStopping] = useState(false);
   const [status, setStatus] = useState(null);
   const [settings, setSettings] = useState({});
+  // Text fields are edited as drafts and only written back to `settings`
+  // once the PUT succeeds, so a failed save reverts to the stored value.
+  const [settingDrafts, setSettingDrafts] = useState({});
+  const [savedKeys, setSavedKeys] = useState({});
+  const [resettingConfig, setResettingConfig] = useState(false);
   const [evalCount, setEvalCount] = useState(null);
   const [regenerating, setRegenerating] = useState(false);
   const [selectedRun, setSelectedRun] = useState(null);
@@ -111,6 +142,7 @@ const AutoresearchPage = () => {
   });
   const socketRef = useRef(null);
   const pollRef = useRef(null);
+  const savedTimersRef = useRef({});
 
   const showMessage = useCallback((message, severity = "info") => {
     setSnackbar({ open: true, message, severity });
@@ -162,6 +194,7 @@ const AutoresearchPage = () => {
     try {
       const data = await ragAutoresearchService.getSettings();
       setSettings(data || {});
+      setSettingDrafts({});
     } catch (e) {
       /* ignore */
     }
@@ -229,12 +262,14 @@ const AutoresearchPage = () => {
       fetchStatus();
     }, 30000);
 
+    const savedTimers = savedTimersRef.current;
     return () => {
       if (socketRef.current) {
         socketRef.current.disconnect();
         socketRef.current = null;
       }
       if (pollRef.current) clearInterval(pollRef.current);
+      Object.values(savedTimers).forEach(clearTimeout);
     };
   }, [fetchAll, fetchRuns, fetchPromotions, fetchMetrics, fetchStatus]);
 
@@ -257,13 +292,93 @@ const AutoresearchPage = () => {
     }
   };
 
-  const handleSettingChange = async (key, value) => {
-    const next = { ...settings, [key]: String(value) };
-    setSettings(next);
+  const markSaved = useCallback((key) => {
+    setSavedKeys((s) => ({ ...s, [key]: true }));
+    if (savedTimersRef.current[key]) clearTimeout(savedTimersRef.current[key]);
+    savedTimersRef.current[key] = setTimeout(() => {
+      setSavedKeys((s) => {
+        const next = { ...s };
+        delete next[key];
+        return next;
+      });
+      delete savedTimersRef.current[key];
+    }, 2500);
+  }, []);
+
+  // Writes one setting. On failure the stored value stands and the field
+  // snaps back to it — a rejected save must never look like it took.
+  const saveSetting = useCallback(
+    async (key, value, label) => {
+      const next = String(value);
+      try {
+        await ragAutoresearchService.updateSettings({ [key]: next });
+        setSettings((s) => ({ ...s, [key]: next }));
+        setSettingDrafts((d) => {
+          const rest = { ...d };
+          delete rest[key];
+          return rest;
+        });
+        markSaved(key);
+        return true;
+      } catch (e) {
+        setSettingDrafts((d) => {
+          const rest = { ...d };
+          delete rest[key];
+          return rest;
+        });
+        showMessage(`Failed to save ${label}: ${e.message}`, "error");
+        return false;
+      }
+    },
+    [markSaved, showMessage],
+  );
+
+  const commitSettingField = useCallback(
+    (key, label) => {
+      const draft = settingDrafts[key];
+      if (draft === undefined) return;
+      if (draft === (settings[key] ?? "")) {
+        setSettingDrafts((d) => {
+          const rest = { ...d };
+          delete rest[key];
+          return rest;
+        });
+        return;
+      }
+      saveSetting(key, draft, label);
+    },
+    [settingDrafts, settings, saveSetting],
+  );
+
+  const settingFieldValue = (key) =>
+    settingDrafts[key] !== undefined
+      ? settingDrafts[key]
+      : (settings[key] ?? "");
+
+  const handleSettingFieldChange = (key, value) =>
+    setSettingDrafts((d) => ({ ...d, [key]: value }));
+
+  const RESET_CONFIRM =
+    "Reset autoresearch to defaults?\n\n" +
+    "This discards the tuned retrieval parameters, the baseline score and phase progress " +
+    "learned by previous nightly runs, and clears the proposer, judge, window and auto-start settings.\n\n" +
+    "Past experiment records are kept. This cannot be undone.";
+
+  const handleResetToDefaults = async () => {
+    if (!window.confirm(RESET_CONFIRM)) return;
+    setResettingConfig(true);
     try {
-      await ragAutoresearchService.updateSettings({ [key]: String(value) });
+      await ragAutoresearchService.resetConfig();
+      setSettingDrafts({});
+      await fetchAll();
+      showMessage(
+        "Autoresearch reset: tuned parameters, baseline and settings are back to defaults",
+        "success",
+      );
     } catch (e) {
-      showMessage(`Failed to update ${key}: ${e.message}`, "error");
+      showMessage(`Failed to reset autoresearch: ${e.message}`, "error");
+    } finally {
+      setResettingConfig(false);
     }
   };
 
@@ -446,67 +561,6 @@ const AutoresearchPage = () => {
             mt: 2,
           }}
         >
-          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
-            <Typography variant="body2">Auto nightly</Typography>
-            <Switch
-              size="small"
-              checked={settings.rag_autoresearch_auto_enabled === "true"}
-              onChange={(e) =>
-                handleSettingChange(
-                  "rag_autoresearch_auto_enabled",
-                  e.target.checked,
-                )
-              }
-            />
-          </Box>
-          <TextField
-            label="Nightly window"
-            size="small"
-            placeholder="20:00-02:00"
-            value={settings.autoresearch_nightly_window || ""}
-            onChange={(e) =>
-              setSettings({
-                ...settings,
-                autoresearch_nightly_window: e.target.value,
-              })
-            }
-            onBlur={(e) =>
-              handleSettingChange("autoresearch_nightly_window", e.target.value)
-            }
-            sx={{ width: 160 }}
-          />
-          <TextField
-            label="Proposer model"
-            size="small"
-            placeholder="(active model)"
-            value={settings.autoresearch_proposer_model || ""}
-            onChange={(e) =>
-              setSettings({
-                ...settings,
-                autoresearch_proposer_model: e.target.value,
-              })
-            }
-            onBlur={(e) =>
-              handleSettingChange("autoresearch_proposer_model", e.target.value)
-            }
-            sx={{ minWidth: 180 }}
-          />
-          <TextField
-            label="Judge model"
-            size="small"
-            placeholder="(active model)"
-            value={settings.autoresearch_judge_model || ""}
-            onChange={(e) =>
-              setSettings({
-                ...settings,
-                autoresearch_judge_model: e.target.value,
-              })
-            }
-            onBlur={(e) =>
-              handleSettingChange("autoresearch_judge_model", e.target.value)
-            }
-            sx={{ minWidth: 180 }}
-          />
           <Typography variant="body2" color="text.secondary">
             Eval pairs: {evalCount ?? "—"}
           </Typography>
@@ -577,6 +631,143 @@ const AutoresearchPage = () => {
             )}
           </Box>
         )}
+      </Paper>
+
+      {/* --- Settings --- */}
+      <Paper
+        elevation={0}
+        sx={{ p: 2, mb: 3, border: 1, borderColor: "divider" }}
+      >
+        <Typography variant="h6" sx={{ mb: 1 }}>
+          Settings
+        </Typography>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ display: "block", mb: 2 }}
+        >
+          Auto-start hands the nightly window to Beat, which starts at most one
+          run per night. Leave a model blank to use the active chat model. Each
+          field saves when you leave it or press Enter.
+        </Typography>
+
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 2,
+            flexWrap: "wrap",
+          }}
+        >
+          <Box
+            sx={{
+              display: "flex",
+              alignItems: "center",
+              gap: 1,
+              minHeight: 40,
+              mt: 0.5,
+            }}
+          >
+            <Typography variant="body2" component="label" htmlFor={AUTO_START_ID}>
+              Auto-start in nightly window
+            </Typography>
+            <Switch
+              size="small"
+              id={AUTO_START_ID}
+              inputProps={{ "aria-label": "Auto-start in nightly window" }}
+              checked={settings.rag_autoresearch_auto_enabled === "true"}
+              disabled={resettingConfig}
+              onChange={(e) =>
+                saveSetting(
+                  "rag_autoresearch_auto_enabled",
+                  e.target.checked,
+                  "auto-start",
+                )
+              }
+            />
+            {savedKeys.rag_autoresearch_auto_enabled && (
+              <Box
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 0.25,
+                  color: "success.main",
+                }}
+              >
+                <SavedIcon sx={{ fontSize: 16 }} />
+                <Typography variant="caption">Saved</Typography>
+              </Box>
+            )}
+          </Box>
+
+          {SETTING_FIELDS.map((f) => (
+            <TextField
+              key={f.key}
+              label={f.label}
+              size="small"
+              placeholder={f.placeholder}
+              value={settingFieldValue(f.key)}
+              disabled={resettingConfig}
+              onChange={(e) => handleSettingFieldChange(f.key, e.target.value)}
+              onBlur={() => commitSettingField(f.key, f.label.toLowerCase())}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  e.target.blur();
+                }
+              }}
+              helperText={savedKeys[f.key] ? "Saved" : " "}
+              FormHelperTextProps={{
+                sx: { color: savedKeys[f.key] ? "success.main" : "inherit" },
+              }}
+              sx={{ width: f.width }}
+            />
+          ))}
+        </Box>
+
+        <Box
+          sx={{
+            mt: 2,
+            pt: 2,
+            borderTop: 1,
+            borderColor: "divider",
+            display: "flex",
+            alignItems: "center",
+            gap: 2,
+            flexWrap: "wrap",
+          }}
+        >
+          <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+            Clears the tuned parameters, baseline and phase progress along with
+            these settings. Past experiment records are kept.
+          </Typography>
+          <Button
+            variant="outlined"
+            color="error"
+            size="small"
+            startIcon={
+              resettingConfig ? (
+                <CircularProgress size={16} />
+              ) : (
+                <ResetDefaultsIcon />
+              )
+            }
+            onClick={handleResetToDefaults}
+            disabled={resettingConfig}
+            // The active theme flattens every outlined button to grey; a
+            // destructive action has to keep reading as destructive.
+            sx={(t) => ({
+              color: "error.main",
+              borderColor: alpha(t.palette.error.main, 0.6),
+              "&:hover": {
+                borderColor: "error.main",
+                backgroundColor: alpha(t.palette.error.main, 0.08),
+              },
+            })}
+          >
+            Reset to Defaults
+          </Button>
+        </Box>
       </Paper>
 
       {/* --- Code keeps (PendingFixes staged by the director) --- */}

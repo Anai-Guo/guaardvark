@@ -408,7 +408,10 @@ const guaardvarkTheme = createFullTheme({
           letterSpacing: "2px",
           borderRadius: "4px",
         },
-        contained: {
+        // Muted slate for the default colour only; a button that asks for
+        // error, warning or success must keep that colour or a destructive
+        // action reads like any other.
+        containedPrimary: {
           backgroundColor: "rgba(255, 255, 255, 0.05)",
           color: "rgba(255, 255, 255, 0.7)",
           border: "1px solid rgba(138, 155, 174, 0.3)",
@@ -417,7 +420,7 @@ const guaardvarkTheme = createFullTheme({
             boxShadow: "0 0 12px rgba(138, 155, 174, 0.2)",
           },
         },
-        outlined: {
+        outlinedPrimary: {
           borderColor: "rgba(255, 255, 255, 0.1)",
           color: "rgba(255, 255, 255, 0.6)",
           "&:hover": {

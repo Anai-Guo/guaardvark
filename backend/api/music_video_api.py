@@ -106,7 +106,10 @@ def _mv_dict(mv: MusicVideo) -> dict:
     out["director_model"] = dm
     out["use_lora_consistency"] = s.get("use_lora_consistency", False)
     out["keyframe_model"] = s.get("keyframe_model", "flux-schnell")
-    out["i2v_model"] = s.get("i2v_model") or ("wan22-14b-i2v" if s.get("i2v_engine", "wan") == "wan" else "cogvideox-5b-i2v")
+    from backend.services.video_model_registry import DEFAULT_I2V_MODEL
+    out["i2v_model"] = s.get("i2v_model") or (
+        "cogvideox-5b-i2v" if s.get("i2v_engine") == "cogvideox" else DEFAULT_I2V_MODEL
+    )
     try:
         from backend.services.video_model_registry import model_capabilities
         out["i2v_native_audio"] = bool((model_capabilities(out["i2v_model"]) or {}).get("audio_out"))
@@ -144,6 +147,13 @@ def create():
 
     if not name or not style_prompt or not song_document_id:
         return jsonify({"error": "name, song_document_id and style_prompt are required"}), 400
+
+    from backend.services.video_model_registry import resolve_active_video_model
+    explicit_i2v = (settings.get("i2v_model") or "").strip() or None
+    picked, resolve_err = resolve_active_video_model("i2v", explicit_i2v, surface="music-video")
+    if resolve_err:
+        return jsonify({"error": resolve_err}), 400
+    settings["i2v_model"] = picked
 
     if project_id is not None and db.session.get(Project, project_id) is None:
         return jsonify({"error": f"project_id {project_id} not found"}), 400
